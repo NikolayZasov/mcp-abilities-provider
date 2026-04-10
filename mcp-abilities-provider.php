@@ -3,7 +3,7 @@
  * Plugin Name:       MCP Abilities Provider
  * Plugin URI:        https://github.com/zasovskiy/mcp-abilities-provider
  * Description:       Универсальный провайдер abilities для WordPress MCP Adapter. Открывает core abilities и регистрирует abilities для управления контентом (посты, страницы, медиа, категории, меню, пользователи, настройки). Работает на любом WordPress 6.9+ сайте.
- * Version:           1.1.0
+ * Version:           1.2.0
  * Requires at least: 6.9
  * Requires PHP:      8.1
  * Author:            Zasovskiy
@@ -18,7 +18,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'MCPAP_VERSION', '1.1.0' );
+define( 'MCPAP_VERSION', '1.2.0' );
 define( 'MCPAP_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'MCPAP_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 
@@ -112,6 +112,10 @@ function mcpap_register_categories(): void {
 			'label'       => __( 'Настройки', 'mcp-abilities-provider' ),
 			'description' => __( 'Abilities для чтения и изменения настроек сайта.', 'mcp-abilities-provider' ),
 		],
+		'classified' => [
+			'label'       => __( 'Доска объявлений', 'mcp-abilities-provider' ),
+			'description' => __( 'Abilities для управления объявлениями, категориями, локациями и магазинами Classified Listing.', 'mcp-abilities-provider' ),
+		],
 	];
 
 	foreach ( $categories as $slug => $args ) {
@@ -149,6 +153,18 @@ function mcpap_register_abilities(): void {
 		mcpap_register_wc_product_taxonomy_abilities();
 		mcpap_register_wc_order_abilities();
 		mcpap_register_wc_coupon_abilities();
+	}
+
+	// Classified Listing abilities (только если Classified Listing активен).
+	if ( defined( 'RTCL_VERSION' ) ) {
+		mcpap_register_rtcl_listing_abilities();
+		mcpap_register_rtcl_taxonomy_abilities();
+		mcpap_register_rtcl_config_abilities();
+
+		// Store & Membership Addon.
+		if ( class_exists( 'RtclStore' ) ) {
+			mcpap_register_rtcl_store_abilities();
+		}
 	}
 }
 
@@ -2743,6 +2759,1459 @@ function mcpap_format_wc_order( WC_Order $order, bool $full = false ): array {
 		if ( $coupons ) {
 			$data['coupons'] = $coupons;
 		}
+	}
+
+	return $data;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CLASSIFIED LISTING: ОБЪЯВЛЕНИЯ
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Регистрирует abilities для работы с объявлениями Classified Listing.
+ *
+ * @since 1.2.0
+ */
+function mcpap_register_rtcl_listing_abilities(): void {
+
+	// --- Список объявлений ---
+	wp_register_ability( 'mcpap/rtcl-get-listings', [
+		'label'       => __( 'Получить объявления', 'mcp-abilities-provider' ),
+		'description' => __( 'Список объявлений Classified Listing с фильтрацией по категории, локации, типу, статусу, цене, featured-флагу и поисковому запросу.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'properties' => [
+				'per_page' => [
+					'type'        => 'integer',
+					'description' => 'Количество объявлений (по умолчанию 10, максимум 100)',
+					'default'     => 10,
+					'minimum'     => 1,
+					'maximum'     => 100,
+				],
+				'page' => [
+					'type'        => 'integer',
+					'description' => 'Номер страницы для пагинации',
+					'default'     => 1,
+				],
+				'status' => [
+					'type'        => 'string',
+					'description' => 'Статус объявления',
+					'enum'        => [ 'publish', 'draft', 'pending', 'private', 'expired', 'rtcl-reviewed', 'any' ],
+					'default'     => 'publish',
+				],
+				'category' => [
+					'type'        => 'integer',
+					'description' => 'ID категории (rtcl_category)',
+				],
+				'category_slug' => [
+					'type'        => 'string',
+					'description' => 'Slug категории',
+				],
+				'location' => [
+					'type'        => 'integer',
+					'description' => 'ID локации (rtcl_location)',
+				],
+				'location_slug' => [
+					'type'        => 'string',
+					'description' => 'Slug локации',
+				],
+				'listing_type' => [
+					'type'        => 'string',
+					'description' => 'Тип объявления',
+					'enum'        => [ 'sell', 'buy', 'exchange', 'to_let', 'job' ],
+				],
+				'featured' => [
+					'type'        => 'boolean',
+					'description' => 'Только рекомендуемые (featured) объявления',
+				],
+				'search' => [
+					'type'        => 'string',
+					'description' => 'Поисковый запрос',
+				],
+				'min_price' => [
+					'type'        => 'number',
+					'description' => 'Минимальная цена',
+				],
+				'max_price' => [
+					'type'        => 'number',
+					'description' => 'Максимальная цена',
+				],
+				'author' => [
+					'type'        => 'integer',
+					'description' => 'ID автора объявлений',
+				],
+				'orderby' => [
+					'type'        => 'string',
+					'description' => 'Сортировка',
+					'enum'        => [ 'date', 'title', 'modified', 'rand', 'meta_value_num', 'ID' ],
+					'default'     => 'date',
+				],
+				'order' => [
+					'type'        => 'string',
+					'enum'        => [ 'ASC', 'DESC' ],
+					'default'     => 'DESC',
+				],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array {
+			$per_page = min( absint( $input['per_page'] ?? 10 ), 100 );
+			$page     = max( 1, absint( $input['page'] ?? 1 ) );
+
+			$args = [
+				'post_type'      => 'rtcl_listing',
+				'post_status'    => sanitize_text_field( $input['status'] ?? 'publish' ),
+				'posts_per_page' => $per_page,
+				'paged'          => $page,
+				'orderby'        => sanitize_text_field( $input['orderby'] ?? 'date' ),
+				'order'          => sanitize_text_field( $input['order'] ?? 'DESC' ),
+			];
+
+			if ( ! empty( $input['search'] ) ) {
+				$args['s'] = sanitize_text_field( $input['search'] );
+			}
+			if ( ! empty( $input['author'] ) ) {
+				$args['author'] = absint( $input['author'] );
+			}
+
+			// Таксономические фильтры.
+			$tax_query = [];
+			if ( ! empty( $input['category'] ) ) {
+				$tax_query[] = [ 'taxonomy' => 'rtcl_category', 'field' => 'term_id', 'terms' => absint( $input['category'] ) ];
+			} elseif ( ! empty( $input['category_slug'] ) ) {
+				$tax_query[] = [ 'taxonomy' => 'rtcl_category', 'field' => 'slug', 'terms' => sanitize_text_field( $input['category_slug'] ) ];
+			}
+			if ( ! empty( $input['location'] ) ) {
+				$tax_query[] = [ 'taxonomy' => 'rtcl_location', 'field' => 'term_id', 'terms' => absint( $input['location'] ) ];
+			} elseif ( ! empty( $input['location_slug'] ) ) {
+				$tax_query[] = [ 'taxonomy' => 'rtcl_location', 'field' => 'slug', 'terms' => sanitize_text_field( $input['location_slug'] ) ];
+			}
+			if ( ! empty( $tax_query ) ) {
+				$tax_query['relation'] = 'AND';
+				$args['tax_query']     = $tax_query;
+			}
+
+			// Мета-фильтры.
+			$meta_query = [];
+			if ( ! empty( $input['listing_type'] ) ) {
+				$meta_query[] = [ 'key' => '_rtcl_listing_type', 'value' => sanitize_text_field( $input['listing_type'] ) ];
+			}
+			if ( isset( $input['featured'] ) && $input['featured'] ) {
+				$meta_query[] = [ 'key' => '_rtcl_featured', 'value' => '1' ];
+			}
+			if ( isset( $input['min_price'] ) || isset( $input['max_price'] ) ) {
+				$price_meta = [ 'key' => '_rtcl_price', 'type' => 'NUMERIC' ];
+				if ( isset( $input['min_price'] ) && isset( $input['max_price'] ) ) {
+					$price_meta['value']   = [ floatval( $input['min_price'] ), floatval( $input['max_price'] ) ];
+					$price_meta['compare'] = 'BETWEEN';
+				} elseif ( isset( $input['min_price'] ) ) {
+					$price_meta['value']   = floatval( $input['min_price'] );
+					$price_meta['compare'] = '>=';
+				} else {
+					$price_meta['value']   = floatval( $input['max_price'] );
+					$price_meta['compare'] = '<=';
+				}
+				$meta_query[] = $price_meta;
+			}
+			if ( ! empty( $meta_query ) ) {
+				$meta_query['relation'] = 'AND';
+				$args['meta_query']     = $meta_query;
+			}
+
+			$query = new WP_Query( $args );
+			$items = [];
+
+			foreach ( $query->posts as $post ) {
+				$items[] = mcpap_format_rtcl_listing( $post );
+			}
+
+			return [
+				'listings' => $items,
+				'total'    => $query->found_posts,
+				'pages'    => $query->max_num_pages,
+				'page'     => $page,
+				'per_page' => $per_page,
+			];
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'edit_posts' );
+		},
+	] );
+
+	// --- Получить объявление по ID ---
+	wp_register_ability( 'mcpap/rtcl-get-listing', [
+		'label'       => __( 'Получить объявление по ID', 'mcp-abilities-provider' ),
+		'description' => __( 'Возвращает полные данные объявления: контент, все мета-поля, категории, локации, кастомные поля, изображения, контактную информацию.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'required'   => [ 'listing_id' ],
+			'properties' => [
+				'listing_id' => [ 'type' => 'integer', 'description' => 'ID объявления' ],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array|WP_Error {
+			$post = get_post( absint( $input['listing_id'] ) );
+			if ( ! $post || 'rtcl_listing' !== $post->post_type ) {
+				return new WP_Error( 'not_found', 'Объявление не найдено' );
+			}
+			return mcpap_format_rtcl_listing( $post, true );
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'edit_posts' );
+		},
+	] );
+
+	// --- Создать объявление ---
+	wp_register_ability( 'mcpap/rtcl-create-listing', [
+		'label'       => __( 'Создать объявление', 'mcp-abilities-provider' ),
+		'description' => __( 'Создаёт новое объявление с заголовком, описанием, ценой, типом, категориями, локациями и контактной информацией.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'required'   => [ 'title' ],
+			'properties' => [
+				'title'       => [ 'type' => 'string', 'description' => 'Заголовок объявления' ],
+				'content'     => [ 'type' => 'string', 'description' => 'Описание объявления (HTML)' ],
+				'excerpt'     => [ 'type' => 'string', 'description' => 'Краткое описание' ],
+				'status'      => [ 'type' => 'string', 'enum' => [ 'publish', 'draft', 'pending' ], 'default' => 'pending' ],
+				'category_ids' => [
+					'type'  => 'array',
+					'items' => [ 'type' => 'integer' ],
+					'description' => 'ID категорий (rtcl_category)',
+				],
+				'location_ids' => [
+					'type'  => 'array',
+					'items' => [ 'type' => 'integer' ],
+					'description' => 'ID локаций (rtcl_location)',
+				],
+				'listing_type' => [
+					'type' => 'string',
+					'enum' => [ 'sell', 'buy', 'exchange', 'to_let', 'job' ],
+					'description' => 'Тип объявления',
+				],
+				'price'       => [ 'type' => 'number', 'description' => 'Цена' ],
+				'max_price'   => [ 'type' => 'number', 'description' => 'Максимальная цена (для диапазона)' ],
+				'price_type'  => [ 'type' => 'string', 'enum' => [ 'fixed', 'negotiable', 'on_call', 'free' ], 'default' => 'fixed' ],
+				'phone'       => [ 'type' => 'string', 'description' => 'Контактный телефон' ],
+				'whatsapp'    => [ 'type' => 'string', 'description' => 'WhatsApp номер' ],
+				'email'       => [ 'type' => 'string', 'description' => 'Контактный email' ],
+				'website'     => [ 'type' => 'string', 'description' => 'Сайт' ],
+				'address'     => [ 'type' => 'string', 'description' => 'Адрес' ],
+				'latitude'    => [ 'type' => 'number', 'description' => 'Широта' ],
+				'longitude'   => [ 'type' => 'number', 'description' => 'Долгота' ],
+				'zipcode'     => [ 'type' => 'string', 'description' => 'Почтовый индекс' ],
+				'featured'    => [ 'type' => 'boolean', 'description' => 'Рекомендуемое объявление', 'default' => false ],
+				'expiry_date' => [ 'type' => 'string', 'description' => 'Дата истечения (Y-m-d H:i:s)' ],
+				'image_id'    => [ 'type' => 'integer', 'description' => 'ID миниатюры' ],
+				'video_urls'  => [
+					'type'  => 'array',
+					'items' => [ 'type' => 'string' ],
+					'description' => 'URL видео',
+				],
+				'custom_fields' => [
+					'type'        => 'object',
+					'description' => 'Кастомные поля: ключ = meta_key (с или без _rtcl_ префикса), значение = значение поля',
+					'additionalProperties' => true,
+				],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array|WP_Error {
+			$post_data = [
+				'post_type'    => 'rtcl_listing',
+				'post_title'   => sanitize_text_field( $input['title'] ),
+				'post_content' => wp_kses_post( $input['content'] ?? '' ),
+				'post_excerpt' => sanitize_text_field( $input['excerpt'] ?? '' ),
+				'post_status'  => sanitize_text_field( $input['status'] ?? 'pending' ),
+				'post_author'  => get_current_user_id(),
+			];
+
+			$listing_id = wp_insert_post( $post_data, true );
+			if ( is_wp_error( $listing_id ) ) {
+				return $listing_id;
+			}
+
+			// Таксономии.
+			if ( ! empty( $input['category_ids'] ) ) {
+				wp_set_object_terms( $listing_id, array_map( 'absint', $input['category_ids'] ), 'rtcl_category' );
+			}
+			if ( ! empty( $input['location_ids'] ) ) {
+				wp_set_object_terms( $listing_id, array_map( 'absint', $input['location_ids'] ), 'rtcl_location' );
+			}
+
+			// Мета-поля.
+			mcpap_save_rtcl_listing_meta( $listing_id, $input );
+
+			// Миниатюра.
+			if ( ! empty( $input['image_id'] ) ) {
+				set_post_thumbnail( $listing_id, absint( $input['image_id'] ) );
+			}
+
+			return [
+				'listing_id' => $listing_id,
+				'url'        => get_permalink( $listing_id ),
+				'created'    => true,
+			];
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'publish_posts' );
+		},
+	] );
+
+	// --- Обновить объявление ---
+	wp_register_ability( 'mcpap/rtcl-update-listing', [
+		'label'       => __( 'Обновить объявление', 'mcp-abilities-provider' ),
+		'description' => __( 'Обновляет существующее объявление: заголовок, описание, цену, тип, контакты, адрес, категории, локации, кастомные поля.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'required'   => [ 'listing_id' ],
+			'properties' => [
+				'listing_id'   => [ 'type' => 'integer', 'description' => 'ID объявления' ],
+				'title'        => [ 'type' => 'string', 'description' => 'Новый заголовок' ],
+				'content'      => [ 'type' => 'string', 'description' => 'Новое описание (HTML)' ],
+				'excerpt'      => [ 'type' => 'string', 'description' => 'Новое краткое описание' ],
+				'status'       => [ 'type' => 'string', 'enum' => [ 'publish', 'draft', 'pending', 'private', 'expired' ] ],
+				'slug'         => [ 'type' => 'string', 'description' => 'Новый slug' ],
+				'category_ids' => [
+					'type'  => 'array',
+					'items' => [ 'type' => 'integer' ],
+					'description' => 'Новые ID категорий (заменяет текущие)',
+				],
+				'location_ids' => [
+					'type'  => 'array',
+					'items' => [ 'type' => 'integer' ],
+					'description' => 'Новые ID локаций (заменяет текущие)',
+				],
+				'listing_type' => [ 'type' => 'string', 'enum' => [ 'sell', 'buy', 'exchange', 'to_let', 'job' ] ],
+				'price'        => [ 'type' => 'number', 'description' => 'Цена' ],
+				'max_price'    => [ 'type' => 'number', 'description' => 'Максимальная цена' ],
+				'price_type'   => [ 'type' => 'string', 'enum' => [ 'fixed', 'negotiable', 'on_call', 'free' ] ],
+				'phone'        => [ 'type' => 'string' ],
+				'whatsapp'     => [ 'type' => 'string' ],
+				'email'        => [ 'type' => 'string' ],
+				'website'      => [ 'type' => 'string' ],
+				'address'      => [ 'type' => 'string' ],
+				'latitude'     => [ 'type' => 'number' ],
+				'longitude'    => [ 'type' => 'number' ],
+				'zipcode'      => [ 'type' => 'string' ],
+				'featured'     => [ 'type' => 'boolean' ],
+				'expiry_date'  => [ 'type' => 'string', 'description' => 'Дата истечения (Y-m-d H:i:s)' ],
+				'image_id'     => [ 'type' => 'integer', 'description' => 'ID миниатюры' ],
+				'video_urls'   => [
+					'type'  => 'array',
+					'items' => [ 'type' => 'string' ],
+				],
+				'custom_fields' => [
+					'type'        => 'object',
+					'description' => 'Кастомные поля: ключ = meta_key, значение = значение поля',
+					'additionalProperties' => true,
+				],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array|WP_Error {
+			$listing_id = absint( $input['listing_id'] );
+			$post       = get_post( $listing_id );
+
+			if ( ! $post || 'rtcl_listing' !== $post->post_type ) {
+				return new WP_Error( 'not_found', 'Объявление не найдено' );
+			}
+
+			$post_data = [ 'ID' => $listing_id ];
+			if ( isset( $input['title'] ) )   $post_data['post_title']   = sanitize_text_field( $input['title'] );
+			if ( isset( $input['content'] ) ) $post_data['post_content'] = wp_kses_post( $input['content'] );
+			if ( isset( $input['excerpt'] ) ) $post_data['post_excerpt'] = sanitize_text_field( $input['excerpt'] );
+			if ( isset( $input['status'] ) )  $post_data['post_status']  = sanitize_text_field( $input['status'] );
+			if ( isset( $input['slug'] ) )    $post_data['post_name']    = sanitize_title( $input['slug'] );
+
+			$result = wp_update_post( $post_data, true );
+			if ( is_wp_error( $result ) ) {
+				return $result;
+			}
+
+			// Таксономии.
+			if ( isset( $input['category_ids'] ) ) {
+				wp_set_object_terms( $listing_id, array_map( 'absint', $input['category_ids'] ), 'rtcl_category' );
+			}
+			if ( isset( $input['location_ids'] ) ) {
+				wp_set_object_terms( $listing_id, array_map( 'absint', $input['location_ids'] ), 'rtcl_location' );
+			}
+
+			// Мета-поля.
+			mcpap_save_rtcl_listing_meta( $listing_id, $input );
+
+			// Миниатюра.
+			if ( isset( $input['image_id'] ) ) {
+				set_post_thumbnail( $listing_id, absint( $input['image_id'] ) );
+			}
+
+			return [
+				'listing_id' => $listing_id,
+				'url'        => get_permalink( $listing_id ),
+				'updated'    => true,
+			];
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'edit_others_posts' );
+		},
+	] );
+
+	// --- Удалить объявление ---
+	wp_register_ability( 'mcpap/rtcl-delete-listing', [
+		'label'       => __( 'Удалить объявление', 'mcp-abilities-provider' ),
+		'description' => __( 'Перемещает объявление в корзину или удаляет окончательно.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'required'   => [ 'listing_id' ],
+			'properties' => [
+				'listing_id'   => [ 'type' => 'integer', 'description' => 'ID объявления' ],
+				'force_delete' => [ 'type' => 'boolean', 'default' => false, 'description' => 'true — удалить навсегда, false — в корзину' ],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array|WP_Error {
+			$post = get_post( absint( $input['listing_id'] ) );
+			if ( ! $post || 'rtcl_listing' !== $post->post_type ) {
+				return new WP_Error( 'not_found', 'Объявление не найдено' );
+			}
+
+			$force  = (bool) ( $input['force_delete'] ?? false );
+			$result = wp_delete_post( $post->ID, $force );
+			if ( ! $result ) {
+				return new WP_Error( 'delete_failed', 'Ошибка удаления' );
+			}
+
+			return [ 'listing_id' => $post->ID, 'deleted' => true, 'trashed' => ! $force ];
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'delete_others_posts' );
+		},
+	] );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CLASSIFIED LISTING: ТАКСОНОМИИ (категории, локации, типы)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Регистрирует abilities для таксономий Classified Listing.
+ *
+ * @since 1.2.0
+ */
+function mcpap_register_rtcl_taxonomy_abilities(): void {
+
+	// --- Категории объявлений ---
+	wp_register_ability( 'mcpap/rtcl-get-categories', [
+		'label'       => __( 'Получить категории объявлений', 'mcp-abilities-provider' ),
+		'description' => __( 'Возвращает иерархическое дерево категорий Classified Listing с количеством объявлений, иконками и описаниями.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'properties' => [
+				'hide_empty' => [ 'type' => 'boolean', 'default' => false, 'description' => 'Скрыть пустые категории' ],
+				'parent'     => [ 'type' => 'integer', 'description' => 'ID родителя (0 — только верхний уровень)' ],
+				'search'     => [ 'type' => 'string', 'description' => 'Поиск по названию' ],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array {
+			$args = [
+				'taxonomy'   => 'rtcl_category',
+				'hide_empty' => (bool) ( $input['hide_empty'] ?? false ),
+				'orderby'    => 'name',
+			];
+			if ( isset( $input['parent'] ) ) {
+				$args['parent'] = absint( $input['parent'] );
+			}
+			if ( ! empty( $input['search'] ) ) {
+				$args['search'] = sanitize_text_field( $input['search'] );
+			}
+
+			$terms  = get_terms( $args );
+			$result = [];
+
+			if ( is_wp_error( $terms ) ) {
+				return [];
+			}
+
+			foreach ( $terms as $term ) {
+				$item = [
+					'term_id'     => $term->term_id,
+					'name'        => $term->name,
+					'slug'        => $term->slug,
+					'description' => $term->description,
+					'parent'      => $term->parent,
+					'count'       => $term->count,
+				];
+
+				// Иконка категории (CL хранит в term_meta).
+				$icon = get_term_meta( $term->term_id, '_rtcl_icon', true );
+				if ( $icon ) {
+					$item['icon'] = $icon;
+				}
+				$image = get_term_meta( $term->term_id, '_rtcl_image', true );
+				if ( $image ) {
+					$item['image_id']  = $image;
+					$item['image_url'] = wp_get_attachment_url( $image );
+				}
+
+				$result[] = $item;
+			}
+
+			return $result;
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'edit_posts' );
+		},
+	] );
+
+	// --- Создать категорию ---
+	wp_register_ability( 'mcpap/rtcl-create-category', [
+		'label'       => __( 'Создать категорию объявлений', 'mcp-abilities-provider' ),
+		'description' => __( 'Создаёт новую категорию в таксономии rtcl_category.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'required'   => [ 'name' ],
+			'properties' => [
+				'name'        => [ 'type' => 'string', 'description' => 'Название категории' ],
+				'slug'        => [ 'type' => 'string', 'description' => 'Slug (ЧПУ)' ],
+				'description' => [ 'type' => 'string', 'description' => 'Описание' ],
+				'parent'      => [ 'type' => 'integer', 'description' => 'ID родительской категории', 'default' => 0 ],
+				'icon'        => [ 'type' => 'string', 'description' => 'CSS-класс иконки (например, rtcl-icon-car)' ],
+				'image_id'    => [ 'type' => 'integer', 'description' => 'ID изображения категории' ],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array|WP_Error {
+			$args = [];
+			if ( ! empty( $input['slug'] ) )        $args['slug']        = sanitize_title( $input['slug'] );
+			if ( ! empty( $input['description'] ) )  $args['description'] = sanitize_text_field( $input['description'] );
+			if ( isset( $input['parent'] ) )         $args['parent']      = absint( $input['parent'] );
+
+			$term = wp_insert_term( sanitize_text_field( $input['name'] ), 'rtcl_category', $args );
+			if ( is_wp_error( $term ) ) {
+				return $term;
+			}
+
+			if ( ! empty( $input['icon'] ) ) {
+				update_term_meta( $term['term_id'], '_rtcl_icon', sanitize_text_field( $input['icon'] ) );
+			}
+			if ( ! empty( $input['image_id'] ) ) {
+				update_term_meta( $term['term_id'], '_rtcl_image', absint( $input['image_id'] ) );
+			}
+
+			return [
+				'term_id' => $term['term_id'],
+				'name'    => sanitize_text_field( $input['name'] ),
+				'created' => true,
+			];
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'manage_categories' );
+		},
+	] );
+
+	// --- Локации ---
+	wp_register_ability( 'mcpap/rtcl-get-locations', [
+		'label'       => __( 'Получить локации', 'mcp-abilities-provider' ),
+		'description' => __( 'Возвращает иерархическое дерево локаций Classified Listing (страна > регион > город).', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'properties' => [
+				'hide_empty' => [ 'type' => 'boolean', 'default' => false ],
+				'parent'     => [ 'type' => 'integer', 'description' => 'ID родителя (0 — только верхний уровень)' ],
+				'search'     => [ 'type' => 'string', 'description' => 'Поиск по названию' ],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array {
+			$args = [
+				'taxonomy'   => 'rtcl_location',
+				'hide_empty' => (bool) ( $input['hide_empty'] ?? false ),
+				'orderby'    => 'name',
+			];
+			if ( isset( $input['parent'] ) ) {
+				$args['parent'] = absint( $input['parent'] );
+			}
+			if ( ! empty( $input['search'] ) ) {
+				$args['search'] = sanitize_text_field( $input['search'] );
+			}
+
+			$terms  = get_terms( $args );
+			$result = [];
+
+			if ( is_wp_error( $terms ) ) {
+				return [];
+			}
+
+			foreach ( $terms as $term ) {
+				$item = [
+					'term_id'     => $term->term_id,
+					'name'        => $term->name,
+					'slug'        => $term->slug,
+					'description' => $term->description,
+					'parent'      => $term->parent,
+					'count'       => $term->count,
+				];
+
+				// Координаты локации.
+				$lat = get_term_meta( $term->term_id, '_rtcl_latitude', true );
+				$lng = get_term_meta( $term->term_id, '_rtcl_longitude', true );
+				if ( $lat ) $item['latitude']  = (float) $lat;
+				if ( $lng ) $item['longitude'] = (float) $lng;
+
+				$result[] = $item;
+			}
+
+			return $result;
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'edit_posts' );
+		},
+	] );
+
+	// --- Создать локацию ---
+	wp_register_ability( 'mcpap/rtcl-create-location', [
+		'label'       => __( 'Создать локацию', 'mcp-abilities-provider' ),
+		'description' => __( 'Создаёт новую локацию в таксономии rtcl_location.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'required'   => [ 'name' ],
+			'properties' => [
+				'name'        => [ 'type' => 'string', 'description' => 'Название локации' ],
+				'slug'        => [ 'type' => 'string', 'description' => 'Slug (ЧПУ)' ],
+				'description' => [ 'type' => 'string', 'description' => 'Описание' ],
+				'parent'      => [ 'type' => 'integer', 'description' => 'ID родительской локации', 'default' => 0 ],
+				'latitude'    => [ 'type' => 'number', 'description' => 'Широта' ],
+				'longitude'   => [ 'type' => 'number', 'description' => 'Долгота' ],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array|WP_Error {
+			$args = [];
+			if ( ! empty( $input['slug'] ) )        $args['slug']        = sanitize_title( $input['slug'] );
+			if ( ! empty( $input['description'] ) )  $args['description'] = sanitize_text_field( $input['description'] );
+			if ( isset( $input['parent'] ) )         $args['parent']      = absint( $input['parent'] );
+
+			$term = wp_insert_term( sanitize_text_field( $input['name'] ), 'rtcl_location', $args );
+			if ( is_wp_error( $term ) ) {
+				return $term;
+			}
+
+			if ( isset( $input['latitude'] ) ) {
+				update_term_meta( $term['term_id'], '_rtcl_latitude', sanitize_text_field( $input['latitude'] ) );
+			}
+			if ( isset( $input['longitude'] ) ) {
+				update_term_meta( $term['term_id'], '_rtcl_longitude', sanitize_text_field( $input['longitude'] ) );
+			}
+
+			return [
+				'term_id' => $term['term_id'],
+				'name'    => sanitize_text_field( $input['name'] ),
+				'created' => true,
+			];
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'manage_categories' );
+		},
+	] );
+
+	// --- Типы объявлений ---
+	wp_register_ability( 'mcpap/rtcl-get-listing-types', [
+		'label'       => __( 'Получить типы объявлений', 'mcp-abilities-provider' ),
+		'description' => __( 'Возвращает доступные типы объявлений (sell, buy, exchange, to_let, job и кастомные).', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'properties' => [],
+		],
+		'execute_callback'    => function ( array $input ): array {
+			// Проверяем зарегистрирована ли таксономия rtcl_listing_type.
+			if ( taxonomy_exists( 'rtcl_listing_type' ) ) {
+				$terms = get_terms( [
+					'taxonomy'   => 'rtcl_listing_type',
+					'hide_empty' => false,
+				] );
+				if ( ! is_wp_error( $terms ) && ! empty( $terms ) ) {
+					$result = [];
+					foreach ( $terms as $term ) {
+						$result[] = [
+							'term_id' => $term->term_id,
+							'name'    => $term->name,
+							'slug'    => $term->slug,
+							'count'   => $term->count,
+						];
+					}
+					return $result;
+				}
+			}
+
+			// Fallback: стандартные типы из настроек CL.
+			$types = apply_filters( 'rtcl_listing_types', [
+				'sell'     => __( 'Продажа', 'mcp-abilities-provider' ),
+				'buy'      => __( 'Покупка', 'mcp-abilities-provider' ),
+				'exchange' => __( 'Обмен', 'mcp-abilities-provider' ),
+				'to_let'   => __( 'Аренда', 'mcp-abilities-provider' ),
+			] );
+
+			$result = [];
+			foreach ( $types as $slug => $label ) {
+				$result[] = [ 'slug' => $slug, 'name' => $label ];
+			}
+			return $result;
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'edit_posts' );
+		},
+	] );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CLASSIFIED LISTING: НАСТРОЙКИ И FORM BUILDER
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Регистрирует abilities для конфигурации Classified Listing.
+ *
+ * @since 1.2.0
+ */
+function mcpap_register_rtcl_config_abilities(): void {
+
+	// --- Настройки CL ---
+	wp_register_ability( 'mcpap/rtcl-get-settings', [
+		'label'       => __( 'Получить настройки Classified Listing', 'mcp-abilities-provider' ),
+		'description' => __( 'Возвращает основные настройки плагина: модерация, лимиты, страницы, карта, валюта, reCAPTCHA.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'properties' => [
+				'group' => [
+					'type'        => 'string',
+					'description' => 'Группа настроек (all — все)',
+					'enum'        => [ 'all', 'general', 'moderation', 'page', 'currency', 'map', 'recaptcha' ],
+					'default'     => 'all',
+				],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array {
+			$group  = sanitize_text_field( $input['group'] ?? 'all' );
+			$result = [];
+
+			// General / Moderation settings.
+			if ( in_array( $group, [ 'all', 'general', 'moderation' ], true ) ) {
+				$general = get_option( 'rtcl_general_settings', [] );
+				$result['general'] = [
+					'new_listing_status'    => $general['new_listing_status'] ?? 'pending',
+					'edited_listing_status' => $general['edited_listing_status'] ?? 'pending',
+					'listing_duration'      => $general['listing_duration'] ?? 30,
+					'max_image_limit'       => $general['max_image_limit'] ?? 5,
+					'max_image_size'        => $general['image_allowed_memory'] ?? 2,
+					'has_map'               => ! empty( $general['has_map'] ) ? true : false,
+					'has_price'             => ! empty( $general['has_price'] ) ? true : false,
+					'has_category'          => ! empty( $general['has_category'] ) ? true : false,
+				];
+			}
+
+			// Page settings.
+			if ( in_array( $group, [ 'all', 'page' ], true ) ) {
+				$pages = get_option( 'rtcl_advanced_settings', [] );
+				$page_ids = [
+					'listings'  => $pages['listings_page'] ?? 0,
+					'my_account' => $pages['myaccount_page'] ?? 0,
+					'checkout'  => $pages['checkout_page'] ?? 0,
+					'submission' => $pages['submission_form_page'] ?? 0,
+				];
+				$result['pages'] = [];
+				foreach ( $page_ids as $key => $pid ) {
+					$result['pages'][ $key ] = [
+						'page_id' => (int) $pid,
+						'url'     => $pid ? get_permalink( $pid ) : '',
+						'title'   => $pid ? get_the_title( $pid ) : '',
+					];
+				}
+			}
+
+			// Currency.
+			if ( in_array( $group, [ 'all', 'currency' ], true ) ) {
+				$payment = get_option( 'rtcl_payment_settings', [] );
+				$result['currency'] = [
+					'currency'          => $payment['currency'] ?? 'USD',
+					'currency_position' => $payment['currency_position'] ?? 'left',
+					'thousand_separator' => $payment['thousand_separator'] ?? ',',
+					'decimal_separator'  => $payment['decimal_separator'] ?? '.',
+				];
+			}
+
+			// Map.
+			if ( in_array( $group, [ 'all', 'map' ], true ) ) {
+				$misc = get_option( 'rtcl_misc_settings', [] );
+				$result['map'] = [
+					'map_type'    => $misc['map_type'] ?? 'google',
+					'has_map_key' => ! empty( $misc['map_api_key'] ),
+					'zoom_level'  => $misc['map_zoom_level'] ?? 15,
+					'center_lat'  => $misc['default_latitude'] ?? '',
+					'center_lng'  => $misc['default_longitude'] ?? '',
+				];
+			}
+
+			// reCAPTCHA.
+			if ( in_array( $group, [ 'all', 'recaptcha' ], true ) ) {
+				$result['recaptcha'] = [
+					'enabled'      => ! empty( get_option( 'rtcl_misc_settings', [] )['recaptcha_site_key'] ),
+					'version'      => get_option( 'rtcl_misc_settings', [] )['recaptcha_version'] ?? 'v2',
+				];
+			}
+
+			$result['version'] = defined( 'RTCL_VERSION' ) ? RTCL_VERSION : 'unknown';
+			$result['pro']     = defined( 'RTCL_PRO_VERSION' );
+
+			return $result;
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'manage_options' );
+		},
+	] );
+
+	// --- Тарифные планы / Pricing ---
+	wp_register_ability( 'mcpap/rtcl-get-pricing-plans', [
+		'label'       => __( 'Получить тарифные планы', 'mcp-abilities-provider' ),
+		'description' => __( 'Возвращает список тарифных планов (pricing/membership) Classified Listing с ценами, лимитами и параметрами.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'properties' => [
+				'status' => [
+					'type'    => 'string',
+					'enum'    => [ 'publish', 'draft', 'any' ],
+					'default' => 'publish',
+				],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array {
+			// Pricing plans — CPT 'rtcl_pricing'.
+			$pricing_type = post_type_exists( 'rtcl_pricing' ) ? 'rtcl_pricing' : null;
+
+			if ( ! $pricing_type ) {
+				return [ 'message' => 'Pricing plans не активированы' ];
+			}
+
+			$plans = get_posts( [
+				'post_type'   => $pricing_type,
+				'post_status' => sanitize_text_field( $input['status'] ?? 'publish' ),
+				'numberposts' => 50,
+				'orderby'     => 'menu_order',
+				'order'       => 'ASC',
+			] );
+
+			$result = [];
+			foreach ( $plans as $plan ) {
+				$item = [
+					'plan_id'     => $plan->ID,
+					'title'       => $plan->post_title,
+					'description' => $plan->post_content,
+					'status'      => $plan->post_status,
+				];
+
+				// Мета-поля плана.
+				$meta_keys = [
+					'price', 'visible', 'featured', 'regular_ads', 'promotion_bump_up',
+					'promotion_featured', 'promotion_top', 'duration',
+				];
+				foreach ( $meta_keys as $key ) {
+					$val = get_post_meta( $plan->ID, $key, true );
+					if ( '' !== $val ) {
+						$item[ $key ] = $val;
+					}
+				}
+
+				$result[] = $item;
+			}
+
+			return $result;
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'manage_options' );
+		},
+	] );
+
+	// --- Получить кастомные поля формы ---
+	wp_register_ability( 'mcpap/rtcl-get-form-fields', [
+		'label'       => __( 'Получить поля формы объявления', 'mcp-abilities-provider' ),
+		'description' => __( 'Возвращает кастомные поля (Form Builder) для указанной категории. Полезно для понимания структуры данных перед созданием/обновлением объявлений.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'properties' => [
+				'category_id' => [
+					'type'        => 'integer',
+					'description' => 'ID категории для получения привязанных полей (если не указан — возвращает все custom field groups)',
+				],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array {
+			// Custom Field Groups — CPT 'rtcl_cfg'.
+			$cfg_type = post_type_exists( 'rtcl_cfg' ) ? 'rtcl_cfg' : null;
+
+			if ( ! $cfg_type ) {
+				return [ 'message' => 'Form Builder не найден (rtcl_cfg)' ];
+			}
+
+			$args = [
+				'post_type'   => $cfg_type,
+				'post_status' => 'publish',
+				'numberposts' => 100,
+			];
+
+			$groups = get_posts( $args );
+			$result = [];
+
+			foreach ( $groups as $group ) {
+				$group_data = [
+					'group_id'    => $group->ID,
+					'title'       => $group->post_title,
+					'categories'  => get_post_meta( $group->ID, '_rtcl_cfg_categories', true ) ?: [],
+				];
+
+				// Если запрошена конкретная категория — фильтруем.
+				if ( ! empty( $input['category_id'] ) ) {
+					$cats = $group_data['categories'];
+					if ( ! empty( $cats ) && ! in_array( absint( $input['category_id'] ), array_map( 'absint', (array) $cats ), true ) ) {
+						continue; // Группа не привязана к этой категории.
+					}
+				}
+
+				// Получаем поля группы (CPT 'rtcl_cf').
+				$fields = get_posts( [
+					'post_type'   => 'rtcl_cf',
+					'post_parent' => $group->ID,
+					'post_status' => 'publish',
+					'numberposts' => 100,
+					'orderby'     => 'menu_order',
+					'order'       => 'ASC',
+				] );
+
+				$group_data['fields'] = [];
+				foreach ( $fields as $field ) {
+					$field_data = [
+						'field_id'    => $field->ID,
+						'label'       => $field->post_title,
+						'meta_key'    => get_post_meta( $field->ID, '_meta_key', true ) ?: '',
+						'type'        => get_post_meta( $field->ID, '_type', true ) ?: 'text',
+						'required'    => (bool) get_post_meta( $field->ID, '_required', true ),
+						'placeholder' => get_post_meta( $field->ID, '_placeholder', true ) ?: '',
+						'description' => get_post_meta( $field->ID, '_description', true ) ?: '',
+					];
+
+					// Опции для select/radio/checkbox.
+					$options = get_post_meta( $field->ID, '_options', true );
+					if ( $options ) {
+						$field_data['options'] = $options;
+					}
+
+					// Validation.
+					$min = get_post_meta( $field->ID, '_min', true );
+					$max = get_post_meta( $field->ID, '_max', true );
+					if ( '' !== $min ) $field_data['min'] = $min;
+					if ( '' !== $max ) $field_data['max'] = $max;
+
+					$group_data['fields'][] = $field_data;
+				}
+
+				$result[] = $group_data;
+			}
+
+			return $result;
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'edit_posts' );
+		},
+	] );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CLASSIFIED LISTING: STORE & MEMBERSHIP
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Регистрирует abilities для магазинов (Store Addon).
+ *
+ * @since 1.2.0
+ */
+function mcpap_register_rtcl_store_abilities(): void {
+
+	// --- Список магазинов ---
+	wp_register_ability( 'mcpap/rtcl-get-stores', [
+		'label'       => __( 'Получить магазины', 'mcp-abilities-provider' ),
+		'description' => __( 'Список магазинов продавцов (Store Addon) с информацией о владельце, рейтинге и количестве объявлений.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'properties' => [
+				'per_page' => [ 'type' => 'integer', 'default' => 20, 'maximum' => 100 ],
+				'page'     => [ 'type' => 'integer', 'default' => 1 ],
+				'search'   => [ 'type' => 'string', 'description' => 'Поиск по названию магазина' ],
+				'orderby'  => [
+					'type' => 'string',
+					'enum' => [ 'date', 'title', 'modified' ],
+					'default' => 'date',
+				],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array {
+			$store_cpt = post_type_exists( 'store' ) ? 'store' : ( post_type_exists( 'rtcl_store' ) ? 'rtcl_store' : null );
+
+			if ( ! $store_cpt ) {
+				return [ 'message' => 'Store Addon не активирован' ];
+			}
+
+			$args = [
+				'post_type'      => $store_cpt,
+				'post_status'    => 'publish',
+				'posts_per_page' => min( absint( $input['per_page'] ?? 20 ), 100 ),
+				'paged'          => max( 1, absint( $input['page'] ?? 1 ) ),
+				'orderby'        => sanitize_text_field( $input['orderby'] ?? 'date' ),
+				'order'          => 'DESC',
+			];
+
+			if ( ! empty( $input['search'] ) ) {
+				$args['s'] = sanitize_text_field( $input['search'] );
+			}
+
+			$query = new WP_Query( $args );
+			$items = [];
+
+			foreach ( $query->posts as $store ) {
+				$items[] = mcpap_format_rtcl_store( $store );
+			}
+
+			return [
+				'stores' => $items,
+				'total'  => $query->found_posts,
+				'pages'  => $query->max_num_pages,
+			];
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'edit_posts' );
+		},
+	] );
+
+	// --- Получить магазин по ID ---
+	wp_register_ability( 'mcpap/rtcl-get-store', [
+		'label'       => __( 'Получить магазин по ID', 'mcp-abilities-provider' ),
+		'description' => __( 'Полные данные магазина: описание, контакты, соцсети, время работы, баннер, рейтинг, количество объявлений.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'required'   => [ 'store_id' ],
+			'properties' => [
+				'store_id' => [ 'type' => 'integer', 'description' => 'ID магазина' ],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array|WP_Error {
+			$store_cpt = post_type_exists( 'store' ) ? 'store' : ( post_type_exists( 'rtcl_store' ) ? 'rtcl_store' : null );
+
+			if ( ! $store_cpt ) {
+				return new WP_Error( 'addon_missing', 'Store Addon не активирован' );
+			}
+
+			$store = get_post( absint( $input['store_id'] ) );
+			if ( ! $store || $store->post_type !== $store_cpt ) {
+				return new WP_Error( 'not_found', 'Магазин не найден' );
+			}
+
+			return mcpap_format_rtcl_store( $store, true );
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'edit_posts' );
+		},
+	] );
+
+	// --- Получить Membership Plans ---
+	wp_register_ability( 'mcpap/rtcl-get-membership-plans', [
+		'label'       => __( 'Получить планы членства', 'mcp-abilities-provider' ),
+		'description' => __( 'Возвращает доступные Membership Plans (Store Addon) с ценами, лимитами и включёнными возможностями.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'properties' => [
+				'status' => [ 'type' => 'string', 'enum' => [ 'publish', 'draft', 'any' ], 'default' => 'publish' ],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array {
+			// Membership — хранится в rtcl_pricing или отдельном CPT.
+			$cpt = null;
+			foreach ( [ 'rtcl_membership', 'rtcl_pricing' ] as $type ) {
+				if ( post_type_exists( $type ) ) {
+					$cpt = $type;
+					break;
+				}
+			}
+
+			if ( ! $cpt ) {
+				return [ 'message' => 'Membership Plans не найдены' ];
+			}
+
+			$plans = get_posts( [
+				'post_type'   => $cpt,
+				'post_status' => sanitize_text_field( $input['status'] ?? 'publish' ),
+				'numberposts' => 50,
+				'orderby'     => 'menu_order',
+				'order'       => 'ASC',
+			] );
+
+			$result = [];
+			foreach ( $plans as $plan ) {
+				$item = [
+					'plan_id'     => $plan->ID,
+					'title'       => $plan->post_title,
+					'description' => $plan->post_content,
+					'status'      => $plan->post_status,
+				];
+
+				// Все мета-поля плана.
+				$all_meta = get_post_meta( $plan->ID );
+				foreach ( $all_meta as $key => $values ) {
+					if ( str_starts_with( $key, '_' ) && ! str_starts_with( $key, '_edit_' ) ) {
+						continue;
+					}
+					$item[ $key ] = count( $values ) === 1 ? $values[0] : $values;
+				}
+
+				// Ключевые поля отдельно.
+				$meta_keys = [ 'price', 'visible', 'featured', 'regular_ads', 'duration' ];
+				foreach ( $meta_keys as $key ) {
+					$val = get_post_meta( $plan->ID, $key, true );
+					if ( '' !== $val ) {
+						$item[ $key ] = $val;
+					}
+				}
+
+				$result[] = $item;
+			}
+
+			return $result;
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'manage_options' );
+		},
+	] );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CLASSIFIED LISTING: HELPER FUNCTIONS
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Сохраняет мета-поля объявления Classified Listing.
+ *
+ * @since 1.2.0
+ *
+ * @param int   $listing_id ID объявления.
+ * @param array $input      Входные данные.
+ */
+function mcpap_save_rtcl_listing_meta( int $listing_id, array $input ): void {
+	$meta_map = [
+		'listing_type' => '_rtcl_listing_type',
+		'price'        => '_rtcl_price',
+		'max_price'    => '_rtcl_max_price',
+		'price_type'   => '_rtcl_price_type',
+		'phone'        => '_rtcl_phone',
+		'whatsapp'     => '_rtcl_whatsapp_number',
+		'email'        => '_rtcl_email',
+		'website'      => '_rtcl_website',
+		'address'      => '_rtcl_address',
+		'latitude'     => '_rtcl_latitude',
+		'longitude'    => '_rtcl_longitude',
+		'zipcode'      => '_rtcl_zipcode',
+		'expiry_date'  => '_rtcl_expiry_date',
+	];
+
+	foreach ( $meta_map as $input_key => $meta_key ) {
+		if ( isset( $input[ $input_key ] ) ) {
+			update_post_meta( $listing_id, $meta_key, sanitize_text_field( $input[ $input_key ] ) );
+		}
+	}
+
+	// Featured.
+	if ( isset( $input['featured'] ) ) {
+		update_post_meta( $listing_id, '_rtcl_featured', $input['featured'] ? 1 : 0 );
+	}
+
+	// Видео.
+	if ( isset( $input['video_urls'] ) ) {
+		$urls = array_map( 'esc_url_raw', (array) $input['video_urls'] );
+		update_post_meta( $listing_id, '_rtcl_video_urls', $urls );
+	}
+
+	// Кастомные поля (Form Builder).
+	if ( ! empty( $input['custom_fields'] ) && is_array( $input['custom_fields'] ) ) {
+		foreach ( $input['custom_fields'] as $key => $value ) {
+			// Если ключ не начинается с _ — добавляем _rtcl_ префикс.
+			$meta_key = str_starts_with( $key, '_' ) ? $key : '_rtcl_' . $key;
+			if ( is_array( $value ) ) {
+				update_post_meta( $listing_id, sanitize_text_field( $meta_key ), array_map( 'sanitize_text_field', $value ) );
+			} else {
+				update_post_meta( $listing_id, sanitize_text_field( $meta_key ), sanitize_text_field( $value ) );
+			}
+		}
+	}
+}
+
+/**
+ * Форматирует данные объявления Classified Listing.
+ *
+ * @since 1.2.0
+ *
+ * @param WP_Post $post Объект записи.
+ * @param bool    $full Полный режим (все мета, кастомные поля, галерея).
+ * @return array
+ */
+function mcpap_format_rtcl_listing( WP_Post $post, bool $full = false ): array {
+	$data = [
+		'listing_id'   => $post->ID,
+		'title'        => $post->post_title,
+		'slug'         => $post->post_name,
+		'status'       => $post->post_status,
+		'url'          => get_permalink( $post->ID ),
+		'date'         => $post->post_date,
+		'modified'     => $post->post_modified,
+		'author_id'    => (int) $post->post_author,
+	];
+
+	// Основные мета.
+	$data['price']        = get_post_meta( $post->ID, '_rtcl_price', true ) ?: null;
+	$data['max_price']    = get_post_meta( $post->ID, '_rtcl_max_price', true ) ?: null;
+	$data['price_type']   = get_post_meta( $post->ID, '_rtcl_price_type', true ) ?: 'fixed';
+	$data['listing_type'] = get_post_meta( $post->ID, '_rtcl_listing_type', true ) ?: null;
+	$data['featured']     = (bool) get_post_meta( $post->ID, '_rtcl_featured', true );
+	$data['views']        = (int) get_post_meta( $post->ID, '_rtcl_views', true );
+	$data['expiry_date']  = get_post_meta( $post->ID, '_rtcl_expiry_date', true ) ?: null;
+
+	// Категории и локации.
+	$cats = wp_get_object_terms( $post->ID, 'rtcl_category', [ 'fields' => 'all' ] );
+	$data['categories'] = [];
+	if ( ! is_wp_error( $cats ) ) {
+		foreach ( $cats as $cat ) {
+			$data['categories'][] = [ 'term_id' => $cat->term_id, 'name' => $cat->name, 'slug' => $cat->slug ];
+		}
+	}
+
+	$locs = wp_get_object_terms( $post->ID, 'rtcl_location', [ 'fields' => 'all' ] );
+	$data['locations'] = [];
+	if ( ! is_wp_error( $locs ) ) {
+		foreach ( $locs as $loc ) {
+			$data['locations'][] = [ 'term_id' => $loc->term_id, 'name' => $loc->name, 'slug' => $loc->slug ];
+		}
+	}
+
+	// Миниатюра.
+	$thumb_id = get_post_thumbnail_id( $post->ID );
+	if ( $thumb_id ) {
+		$data['thumbnail'] = [
+			'id'  => $thumb_id,
+			'url' => wp_get_attachment_url( $thumb_id ),
+		];
+	}
+
+	if ( $full ) {
+		// Контент.
+		$data['content'] = $post->post_content;
+		$data['excerpt'] = $post->post_excerpt;
+
+		// Контактная информация.
+		$data['contact'] = [
+			'phone'    => get_post_meta( $post->ID, '_rtcl_phone', true ) ?: null,
+			'whatsapp' => get_post_meta( $post->ID, '_rtcl_whatsapp_number', true ) ?: null,
+			'email'    => get_post_meta( $post->ID, '_rtcl_email', true ) ?: null,
+			'website'  => get_post_meta( $post->ID, '_rtcl_website', true ) ?: null,
+		];
+
+		// Геолокация.
+		$data['geo'] = [
+			'address'   => get_post_meta( $post->ID, '_rtcl_address', true ) ?: null,
+			'geo_address' => get_post_meta( $post->ID, '_rtcl_geo_address', true ) ?: null,
+			'latitude'  => get_post_meta( $post->ID, '_rtcl_latitude', true ) ?: null,
+			'longitude' => get_post_meta( $post->ID, '_rtcl_longitude', true ) ?: null,
+			'zipcode'   => get_post_meta( $post->ID, '_rtcl_zipcode', true ) ?: null,
+		];
+
+		// Видео.
+		$videos = get_post_meta( $post->ID, '_rtcl_video_urls', true );
+		if ( $videos ) {
+			$data['video_urls'] = $videos;
+		}
+
+		// Галерея изображений.
+		$gallery_ids = get_post_meta( $post->ID, '_rtcl_images', true );
+		if ( $gallery_ids && is_array( $gallery_ids ) ) {
+			$data['gallery'] = [];
+			foreach ( $gallery_ids as $img_id ) {
+				$data['gallery'][] = [
+					'id'  => $img_id,
+					'url' => wp_get_attachment_url( $img_id ),
+				];
+			}
+		}
+
+		// Все кастомные поля (_rtcl_ и Form Builder).
+		$all_meta = get_post_meta( $post->ID );
+		$data['custom_fields'] = [];
+		$skip_keys = [
+			'_rtcl_price', '_rtcl_max_price', '_rtcl_price_type', '_rtcl_listing_type',
+			'_rtcl_featured', '_rtcl_views', '_rtcl_expiry_date',
+			'_rtcl_phone', '_rtcl_whatsapp_number', '_rtcl_email', '_rtcl_website',
+			'_rtcl_address', '_rtcl_geo_address', '_rtcl_latitude', '_rtcl_longitude', '_rtcl_zipcode',
+			'_rtcl_video_urls', '_rtcl_images', '_rtcl_manager_id',
+			'_thumbnail_id', '_edit_lock', '_edit_last', '_wp_old_slug',
+		];
+
+		foreach ( $all_meta as $key => $values ) {
+			if ( in_array( $key, $skip_keys, true ) ) {
+				continue;
+			}
+			// Включаем _rtcl_ кастомные поля и поля без подчёркивания (Form Builder).
+			if ( str_starts_with( $key, '_rtcl_' ) || ! str_starts_with( $key, '_' ) ) {
+				$val = count( $values ) === 1 ? maybe_unserialize( $values[0] ) : array_map( 'maybe_unserialize', $values );
+				if ( '' !== $val && null !== $val ) {
+					$data['custom_fields'][ $key ] = $val;
+				}
+			}
+		}
+
+		// Автор.
+		$author = get_user_by( 'ID', $post->post_author );
+		if ( $author ) {
+			$data['author'] = [
+				'id'           => $author->ID,
+				'display_name' => $author->display_name,
+				'email'        => $author->user_email,
+			];
+		}
+
+		$data['edit_url'] = get_edit_post_link( $post->ID, 'raw' );
+	}
+
+	return $data;
+}
+
+/**
+ * Форматирует данные магазина (Store Addon).
+ *
+ * @since 1.2.0
+ *
+ * @param WP_Post $store Объект записи магазина.
+ * @param bool    $full  Полный режим.
+ * @return array
+ */
+function mcpap_format_rtcl_store( WP_Post $store, bool $full = false ): array {
+	$data = [
+		'store_id'  => $store->ID,
+		'title'     => $store->post_title,
+		'slug'      => $store->post_name,
+		'url'       => get_permalink( $store->ID ),
+		'date'      => $store->post_date,
+		'owner_id'  => (int) $store->post_author,
+	];
+
+	// Логотип.
+	$logo_id = get_post_thumbnail_id( $store->ID );
+	if ( $logo_id ) {
+		$data['logo'] = [
+			'id'  => $logo_id,
+			'url' => wp_get_attachment_url( $logo_id ),
+		];
+	}
+
+	// Количество объявлений.
+	$listings_count = new WP_Query( [
+		'post_type'      => 'rtcl_listing',
+		'post_status'    => 'publish',
+		'author'         => $store->post_author,
+		'posts_per_page' => 1,
+		'fields'         => 'ids',
+	] );
+	$data['listings_count'] = $listings_count->found_posts;
+
+	if ( $full ) {
+		$data['description'] = $store->post_content;
+
+		// Контактные данные магазина.
+		$data['contact'] = [
+			'phone'   => get_post_meta( $store->ID, 'phone', true ) ?: null,
+			'email'   => get_post_meta( $store->ID, 'email', true ) ?: null,
+			'website' => get_post_meta( $store->ID, 'website', true ) ?: null,
+			'address' => get_post_meta( $store->ID, 'address', true ) ?: null,
+		];
+
+		// Соцсети.
+		$socials = [ 'facebook', 'twitter', 'youtube', 'linkedin', 'instagram', 'pinterest' ];
+		$data['social'] = [];
+		foreach ( $socials as $social ) {
+			$val = get_post_meta( $store->ID, $social, true );
+			if ( $val ) {
+				$data['social'][ $social ] = $val;
+			}
+		}
+		if ( empty( $data['social'] ) ) {
+			unset( $data['social'] );
+		}
+
+		// Баннер.
+		$banner_id = get_post_meta( $store->ID, 'banner_id', true );
+		if ( $banner_id ) {
+			$data['banner'] = [
+				'id'  => $banner_id,
+				'url' => wp_get_attachment_url( $banner_id ),
+			];
+		}
+
+		// Время работы.
+		$oh = get_post_meta( $store->ID, 'oh_hours', true );
+		if ( $oh ) {
+			$data['opening_hours'] = $oh;
+		}
+
+		// Верифицирован.
+		$data['verified'] = (bool) get_post_meta( $store->ID, '_rtcl_verified', true );
+
+		// Владелец.
+		$owner = get_user_by( 'ID', $store->post_author );
+		if ( $owner ) {
+			$data['owner'] = [
+				'id'           => $owner->ID,
+				'display_name' => $owner->display_name,
+				'email'        => $owner->user_email,
+			];
+		}
+
+		$data['edit_url'] = get_edit_post_link( $store->ID, 'raw' );
 	}
 
 	return $data;

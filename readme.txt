@@ -1,14 +1,14 @@
 === MCP Abilities Provider ===
 Contributors: zasovskiy
-Tags: mcp, ai, abilities, model-context-protocol, claude, automation, woocommerce
+Tags: mcp, ai, abilities, model-context-protocol, claude, automation, woocommerce, classified-listing
 Requires at least: 6.9
 Tested up to: 7.0
 Requires PHP: 8.1
-Stable tag: 1.1.0
+Stable tag: 1.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Универсальный провайдер abilities для WordPress MCP Adapter. Мгновенно открывает управление контентом и WooCommerce для AI-агентов на любом WordPress-сайте.
+Универсальный провайдер abilities для WordPress MCP Adapter. Мгновенно открывает управление контентом, WooCommerce и Classified Listing для AI-агентов на любом WordPress-сайте.
 
 == Description ==
 
@@ -17,7 +17,7 @@ License URI: https://www.gnu.org/licenses/gpl-2.0.html
 Плагин решает главную проблему: после установки MCP Adapter abilities не видны AI-клиентам, потому что ни одна из них не помечена как `mcp.public`. Этот плагин:
 
 1. **Открывает core abilities** (get-site-info, get-user-info, get-environment-info) для MCP
-2. **Регистрирует 40+ abilities** для полноценного управления сайтом и магазином через AI
+2. **Регистрирует 60+ abilities** для полноценного управления сайтом, магазином и доской объявлений через AI
 
 = Доступные abilities =
 
@@ -82,12 +82,38 @@ License URI: https://www.gnu.org/licenses/gpl-2.0.html
 * Получить список купонов
 * Создать купон (процент, фиксированная скидка, бесплатная доставка, лимиты)
 
+**Classified Listing — Объявления (если Classified Listing активен):**
+* Получить список объявлений с фильтрацией по категории, локации, типу, цене, featured
+* Получить объявление по ID (контент, мета, контакты, геолокация, кастомные поля, галерея)
+* Создать объявление (с категориями, локациями, ценой, контактами, кастомными полями)
+* Обновить объявление
+* Удалить объявление
+
+**Classified Listing — Категории и локации:**
+* Получить категории объявлений (иерархия, иконки, изображения)
+* Создать категорию объявлений
+* Получить локации (иерархия, координаты)
+* Создать локацию
+* Получить типы объявлений (sell, buy, exchange, to_let)
+
+**Classified Listing — Настройки и Form Builder:**
+* Получить настройки CL (модерация, валюта, страницы, карта)
+* Получить тарифные планы (Pricing Plans)
+* Получить поля формы (Form Builder) для категории
+
+**Classified Listing — Store & Membership (если Store Addon активен):**
+* Получить список магазинов
+* Получить магазин по ID (контакты, соцсети, время работы, баннер, рейтинг)
+* Получить планы членства (Membership Plans)
+
 = Требования =
 
 * WordPress 6.9+ (с Abilities API в ядре)
 * [MCP Adapter](https://github.com/WordPress/mcp-adapter) v0.4.0+
 * PHP 8.1+
 * WooCommerce 8.0+ (опционально, для WooCommerce abilities)
+* Classified Listing Pro / Free (опционально, для Classified Listing abilities)
+* Classified Listing Store Addon (опционально, для Store/Membership abilities)
 
 = Безопасность =
 
@@ -103,8 +129,21 @@ License URI: https://www.gnu.org/licenses/gpl-2.0.html
 3. Активируйте плагин через «Плагины» в админке
 4. Abilities автоматически станут доступны для MCP-клиентов
 5. WooCommerce abilities появятся автоматически, если WooCommerce активен
+6. Classified Listing abilities появятся автоматически, если Classified Listing активен
 
 == Changelog ==
+
+= 1.2.0 =
+* Добавлена полная поддержка Classified Listing (Pro и Free)
+* 18 новых abilities для управления доской объявлений через AI
+* Объявления: CRUD с фильтрацией по категории, локации, типу, цене
+* Категории и локации: получение с иерархией, создание
+* Типы объявлений: получение всех зарегистрированных типов
+* Настройки CL: модерация, валюта, карта, страницы
+* Form Builder: получение кастомных полей по категории
+* Тарифные планы и Pricing Plans
+* Store & Membership Addon: магазины, планы членства
+* Вспомогательные функции для форматирования данных
 
 = 1.1.0 =
 * Добавлена поддержка WooCommerce: товары, категории, метки, заказы, купоны
