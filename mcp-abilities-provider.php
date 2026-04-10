@@ -3,7 +3,7 @@
  * Plugin Name:       MCP Abilities Provider
  * Plugin URI:        https://github.com/zasovskiy/mcp-abilities-provider
  * Description:       Универсальный провайдер abilities для WordPress MCP Adapter. Открывает core abilities и регистрирует abilities для управления контентом (посты, страницы, медиа, категории, меню, пользователи, настройки). Работает на любом WordPress 6.9+ сайте.
- * Version:           1.2.0
+ * Version:           1.3.0
  * Requires at least: 6.9
  * Requires PHP:      8.1
  * Author:            Zasovskiy
@@ -18,7 +18,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'MCPAP_VERSION', '1.2.0' );
+define( 'MCPAP_VERSION', '1.3.0' );
 define( 'MCPAP_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'MCPAP_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 
@@ -4216,3 +4216,218 @@ function mcpap_format_rtcl_store( WP_Post $store, bool $full = false ): array {
 
 	return $data;
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CLASSIFIED LISTING: FORM BUILDER (создание групп полей)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Регистрирует abilities для создания форм в Form Builder.
+ *
+ * @since 1.3.0
+ */
+function mcpap_register_rtcl_form_builder_abilities(): void {
+
+	// --- Создать группу полей Form Builder ---
+	wp_register_ability( 'mcpap/rtcl-create-form-group', [
+		'label'       => __( 'Создать группу полей формы', 'mcp-abilities-provider' ),
+		'description' => __( 'Создаёт группу кастомных полей (Form Builder) для указанных категорий объявлений с набором полей (select, radio, checkbox, text, textarea, number).', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'required'   => [ 'title', 'fields' ],
+			'properties' => [
+				'title' => [
+					'type'        => 'string',
+					'description' => 'Название группы полей',
+				],
+				'category_ids' => [
+					'type'        => 'array',
+					'items'       => [ 'type' => 'integer' ],
+					'description' => 'ID категорий rtcl_category, к которым привязывается форма',
+				],
+				'fields' => [
+					'type'        => 'array',
+					'description' => 'Массив полей формы',
+					'items'       => [
+						'type'       => 'object',
+						'required'   => [ 'label', 'type' ],
+						'properties' => [
+							'label'       => [ 'type' => 'string', 'description' => 'Подпись поля' ],
+							'meta_key'    => [ 'type' => 'string', 'description' => 'Ключ для хранения значения в postmeta' ],
+							'type'        => [
+								'type' => 'string',
+								'enum' => [ 'text', 'textarea', 'select', 'radio', 'checkbox', 'number', 'url', 'date', 'color' ],
+								'description' => 'Тип поля',
+							],
+							'required'    => [ 'type' => 'boolean', 'default' => false ],
+							'placeholder' => [ 'type' => 'string', 'description' => 'Подсказка' ],
+							'description' => [ 'type' => 'string', 'description' => 'Описание поля' ],
+							'choices'     => [
+								'type'        => 'object',
+								'description' => 'Варианты для select/radio/checkbox: ключ => метка',
+								'additionalProperties' => [ 'type' => 'string' ],
+							],
+							'default'     => [ 'type' => 'string', 'description' => 'Значение по умолчанию' ],
+							'min'         => [ 'type' => 'number', 'description' => 'Минимум (для number)' ],
+							'max'         => [ 'type' => 'number', 'description' => 'Максимум (для number)' ],
+							'order'       => [ 'type' => 'integer', 'description' => 'Порядок отображения', 'default' => 0 ],
+						],
+					],
+				],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array|WP_Error {
+
+			if ( ! post_type_exists( 'rtcl_cfg' ) ) {
+				return new WP_Error( 'cpt_missing', 'Custom Field Groups (rtcl_cfg) не зарегистрированы. Убедитесь, что Classified Listing Pro активен.' );
+			}
+
+			// 1. Создаём группу (rtcl_cfg).
+			$group_data = [
+				'post_type'   => 'rtcl_cfg',
+				'post_title'  => sanitize_text_field( $input['title'] ),
+				'post_status' => 'publish',
+				'post_author' => get_current_user_id(),
+			];
+
+			$group_id = wp_insert_post( $group_data, true );
+			if ( is_wp_error( $group_id ) ) {
+				return $group_id;
+			}
+
+			// 2. Привязываем категории.
+			$category_ids = ! empty( $input['category_ids'] )
+				? array_map( 'absint', $input['category_ids'] )
+				: [];
+
+			update_post_meta( $group_id, '_rtcl_cfg_categories', $category_ids );
+
+			// 3. Создаём поля (rtcl_cf) как дочерние посты.
+			$created_fields = [];
+			$order          = 0;
+
+			foreach ( $input['fields'] as $field_def ) {
+				$order++;
+				$field_title = sanitize_text_field( $field_def['label'] ?? '' );
+				$meta_key    = sanitize_text_field( $field_def['meta_key'] ?? sanitize_title( $field_title ) );
+				$field_type  = sanitize_text_field( $field_def['type'] ?? 'text' );
+
+				$field_post_data = [
+					'post_type'    => 'rtcl_cf',
+					'post_title'   => $field_title,
+					'post_status'  => 'publish',
+					'post_parent'  => $group_id,
+					'menu_order'   => isset( $field_def['order'] ) ? absint( $field_def['order'] ) : $order,
+					'post_author'  => get_current_user_id(),
+				];
+
+				$field_id = wp_insert_post( $field_post_data, true );
+				if ( is_wp_error( $field_id ) ) {
+					continue;
+				}
+
+				// Мета-поля поля.
+				update_post_meta( $field_id, '_meta_key', $meta_key );
+				update_post_meta( $field_id, '_type', $field_type );
+				update_post_meta( $field_id, '_required', ! empty( $field_def['required'] ) ? '1' : '0' );
+				update_post_meta( $field_id, '_placeholder', sanitize_text_field( $field_def['placeholder'] ?? '' ) );
+				update_post_meta( $field_id, '_description', sanitize_text_field( $field_def['description'] ?? '' ) );
+
+				// Числовые пределы.
+				if ( isset( $field_def['min'] ) ) {
+					update_post_meta( $field_id, '_min', sanitize_text_field( $field_def['min'] ) );
+				}
+				if ( isset( $field_def['max'] ) ) {
+					update_post_meta( $field_id, '_max', sanitize_text_field( $field_def['max'] ) );
+				}
+
+				// Варианты выбора (select, radio, checkbox).
+				if ( ! empty( $field_def['choices'] ) && is_array( $field_def['choices'] ) ) {
+					$sanitized_choices = [];
+					foreach ( $field_def['choices'] as $choice_key => $choice_label ) {
+						$sanitized_choices[ sanitize_text_field( $choice_key ) ] = sanitize_text_field( $choice_label );
+					}
+					$options = [
+						'default' => isset( $field_def['default'] ) ? sanitize_text_field( $field_def['default'] ) : null,
+						'choices' => $sanitized_choices,
+					];
+					update_post_meta( $field_id, '_options', $options );
+				}
+
+				$created_fields[] = [
+					'field_id' => $field_id,
+					'label'    => $field_title,
+					'meta_key' => $meta_key,
+					'type'     => $field_type,
+				];
+			}
+
+			return [
+				'group_id'      => $group_id,
+				'title'         => sanitize_text_field( $input['title'] ),
+				'category_ids'  => $category_ids,
+				'fields_created' => count( $created_fields ),
+				'fields'        => $created_fields,
+				'created'       => true,
+			];
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'manage_options' );
+		},
+	] );
+
+	// --- Удалить группу полей Form Builder ---
+	wp_register_ability( 'mcpap/rtcl-delete-form-group', [
+		'label'       => __( 'Удалить группу полей формы', 'mcp-abilities-provider' ),
+		'description' => __( 'Удаляет группу кастомных полей Form Builder вместе со всеми её полями.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'required'   => [ 'group_id' ],
+			'properties' => [
+				'group_id'     => [ 'type' => 'integer', 'description' => 'ID группы полей (rtcl_cfg)' ],
+				'force_delete' => [ 'type' => 'boolean', 'default' => true ],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array|WP_Error {
+			$group_id = absint( $input['group_id'] );
+			$post     = get_post( $group_id );
+
+			if ( ! $post || 'rtcl_cfg' !== $post->post_type ) {
+				return new WP_Error( 'not_found', 'Группа полей не найдена' );
+			}
+
+			// Удаляем дочерние поля (rtcl_cf).
+			$fields = get_posts( [
+				'post_type'   => 'rtcl_cf',
+				'post_parent' => $group_id,
+				'numberposts' => 200,
+				'fields'      => 'ids',
+			] );
+			foreach ( $fields as $field_id ) {
+				wp_delete_post( $field_id, true );
+			}
+
+			wp_delete_post( $group_id, (bool) ( $input['force_delete'] ?? true ) );
+
+			return [
+				'group_id'       => $group_id,
+				'deleted'        => true,
+				'fields_deleted' => count( $fields ),
+			];
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'manage_options' );
+		},
+	] );
+}
+
+// Регистрация Form Builder abilities.
+add_action( 'wp_abilities_api_init', function (): void {
+	if ( defined( 'RTCL_VERSION' ) && post_type_exists( 'rtcl_cfg' ) ) {
+		mcpap_register_rtcl_form_builder_abilities();
+	}
+}, 20 );
