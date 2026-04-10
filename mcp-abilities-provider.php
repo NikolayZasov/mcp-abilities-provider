@@ -4427,7 +4427,180 @@ function mcpap_register_rtcl_form_builder_abilities(): void {
 
 // Регистрация Form Builder abilities.
 add_action( 'wp_abilities_api_init', function (): void {
-	if ( defined( 'RTCL_VERSION' ) && post_type_exists( 'rtcl_cfg' ) ) {
-		mcpap_register_rtcl_form_builder_abilities();
+	if ( defined( 'RTCL_VERSION' ) ) {
+		if ( post_type_exists( 'rtcl_cfg' ) ) {
+			mcpap_register_rtcl_form_builder_abilities();
+		}
+		mcpap_register_rtcl_fb_abilities();
 	}
 }, 20 );
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CLASSIFIED LISTING: NEW FORM BUILDER (CL 5.x)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Регистрирует abilities для нового Form Builder (CL Pro 5.x).
+ *
+ * @since 1.3.0
+ */
+function mcpap_register_rtcl_fb_abilities(): void {
+
+	// --- Получить формы (rtcl_builder) ---
+	wp_register_ability( 'mcpap/rtcl-get-forms', [
+		'label'       => __( 'Получить формы Form Builder', 'mcp-abilities-provider' ),
+		'description' => __( 'Список форм нового Form Builder (CL 5.x) с ID, заголовком и всеми данными включая структуру полей.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'properties' => [
+				'form_id' => [
+					'type'        => 'integer',
+					'description' => 'ID конкретной формы. Если не указан — возвращает все формы.',
+				],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array|WP_Error {
+
+			// Определяем CPT нового Form Builder.
+			$fb_cpt = null;
+			foreach ( [ 'rtcl_builder', 'rtcl_form', 'rtcl_fb' ] as $cpt ) {
+				if ( post_type_exists( $cpt ) ) {
+					$fb_cpt = $cpt;
+					break;
+				}
+			}
+
+			if ( ! $fb_cpt ) {
+				return new WP_Error( 'not_found', 'Form Builder CPT не найден. Зарегистрированные CPT: ' . implode( ', ', get_post_types( [ 'public' => false ], 'names' ) ) );
+			}
+
+			if ( ! empty( $input['form_id'] ) ) {
+				$post = get_post( absint( $input['form_id'] ) );
+				if ( ! $post ) {
+					return new WP_Error( 'not_found', 'Форма не найдена' );
+				}
+
+				return mcpap_format_rtcl_fb_form( $post );
+			}
+
+			$posts = get_posts( [
+				'post_type'   => $fb_cpt,
+				'post_status' => 'any',
+				'numberposts' => 50,
+			] );
+
+			$result = [];
+			foreach ( $posts as $post ) {
+				$result[] = mcpap_format_rtcl_fb_form( $post );
+			}
+
+			return $result;
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'manage_options' );
+		},
+	] );
+
+	// --- Inspect: прочитать raw post + all meta ---
+	wp_register_ability( 'mcpap/rtcl-inspect-post', [
+		'label'       => __( 'Инспектировать пост (raw)', 'mcp-abilities-provider' ),
+		'description' => __( 'Возвращает все данные поста любого типа: post_content, post_meta, таксономии. Диагностический инструмент.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'required'   => [ 'post_id' ],
+			'properties' => [
+				'post_id' => [ 'type' => 'integer', 'description' => 'ID записи' ],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array|WP_Error {
+			$post = get_post( absint( $input['post_id'] ) );
+			if ( ! $post ) {
+				return new WP_Error( 'not_found', 'Запись не найдена' );
+			}
+
+			$data = [
+				'ID'           => $post->ID,
+				'post_type'    => $post->post_type,
+				'post_title'   => $post->post_title,
+				'post_name'    => $post->post_name,
+				'post_status'  => $post->post_status,
+				'post_date'    => $post->post_date,
+				'post_parent'  => $post->post_parent,
+				'menu_order'   => $post->menu_order,
+				'post_content' => $post->post_content,
+				'post_excerpt' => $post->post_excerpt,
+			];
+
+			// Все meta.
+			$all_meta = get_post_meta( $post->ID );
+			$data['meta'] = [];
+			foreach ( $all_meta as $key => $values ) {
+				$val = count( $values ) === 1 ? maybe_unserialize( $values[0] ) : array_map( 'maybe_unserialize', $values );
+				$data['meta'][ $key ] = $val;
+			}
+
+			// Все таксономии.
+			$taxonomies = get_object_taxonomies( $post->post_type );
+			$data['taxonomies'] = [];
+			foreach ( $taxonomies as $tax ) {
+				$terms = wp_get_object_terms( $post->ID, $tax, [ 'fields' => 'all' ] );
+				if ( ! is_wp_error( $terms ) && ! empty( $terms ) ) {
+					$data['taxonomies'][ $tax ] = [];
+					foreach ( $terms as $term ) {
+						$data['taxonomies'][ $tax ][] = [
+							'term_id' => $term->term_id,
+							'name'    => $term->name,
+							'slug'    => $term->slug,
+						];
+					}
+				}
+			}
+
+			return $data;
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'manage_options' );
+		},
+	] );
+}
+
+/**
+ * Форматирует данные формы Form Builder.
+ *
+ * @since 1.3.0
+ */
+function mcpap_format_rtcl_fb_form( WP_Post $post ): array {
+	$data = [
+		'form_id'    => $post->ID,
+		'title'      => $post->post_title,
+		'slug'       => $post->post_name,
+		'status'     => $post->post_status,
+		'post_type'  => $post->post_type,
+		'date'       => $post->post_date,
+	];
+
+	// Content (может быть JSON).
+	$content = $post->post_content;
+	$decoded = json_decode( $content, true );
+	if ( json_last_error() === JSON_ERROR_NONE ) {
+		$data['content_json'] = $decoded;
+	} else {
+		$data['content_raw'] = mb_substr( $content, 0, 5000 );
+	}
+
+	// Все meta.
+	$all_meta = get_post_meta( $post->ID );
+	$data['meta'] = [];
+	foreach ( $all_meta as $key => $values ) {
+		$val = count( $values ) === 1 ? maybe_unserialize( $values[0] ) : array_map( 'maybe_unserialize', $values );
+		$data['meta'][ $key ] = $val;
+	}
+
+	return $data;
+}
