@@ -4604,3 +4604,169 @@ function mcpap_format_rtcl_fb_form( WP_Post $post ): array {
 
 	return $data;
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// DIAGNOSTIC / REPAIR ABILITIES
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Регистрирует диагностические abilities для работы с мета.
+ *
+ * @since 1.3.0
+ */
+function mcpap_register_diagnostic_abilities(): void {
+
+	// --- Инспектировать term meta ---
+	wp_register_ability( 'mcpap/inspect-term', [
+		'label'       => __( 'Инспектировать таксономию (term meta)', 'mcp-abilities-provider' ),
+		'description' => __( 'Возвращает все данные термина: имя, slug, parent, все мета. Диагностический инструмент.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'required'   => [ 'term_id' ],
+			'properties' => [
+				'term_id'  => [ 'type' => 'integer', 'description' => 'ID термина' ],
+				'taxonomy' => [ 'type' => 'string', 'description' => 'Таксономия (необязательно, auto-detect)' ],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array|WP_Error {
+			$term_id = absint( $input['term_id'] );
+
+			// Определяем таксономию.
+			$taxonomy = ! empty( $input['taxonomy'] ) ? sanitize_text_field( $input['taxonomy'] ) : null;
+			if ( ! $taxonomy ) {
+				global $wpdb;
+				$taxonomy = $wpdb->get_var( $wpdb->prepare(
+					"SELECT taxonomy FROM {$wpdb->term_taxonomy} WHERE term_id = %d LIMIT 1",
+					$term_id
+				) );
+			}
+
+			if ( ! $taxonomy ) {
+				return new WP_Error( 'not_found', 'Термин не найден' );
+			}
+
+			$term = get_term( $term_id, $taxonomy );
+			if ( ! $term || is_wp_error( $term ) ) {
+				return new WP_Error( 'not_found', 'Термин не найден' );
+			}
+
+			$data = [
+				'term_id'     => $term->term_id,
+				'name'        => $term->name,
+				'slug'        => $term->slug,
+				'taxonomy'    => $term->taxonomy,
+				'parent'      => $term->parent,
+				'description' => $term->description,
+				'count'       => $term->count,
+			];
+
+			// Все meta.
+			$all_meta = get_term_meta( $term_id );
+			$data['meta'] = [];
+			foreach ( $all_meta as $key => $values ) {
+				$val = count( $values ) === 1 ? maybe_unserialize( $values[0] ) : array_map( 'maybe_unserialize', $values );
+				$data['meta'][ $key ] = $val;
+			}
+
+			return $data;
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'manage_options' );
+		},
+	] );
+
+	// --- Обновить post meta ---
+	wp_register_ability( 'mcpap/update-post-meta', [
+		'label'       => __( 'Обновить мета поста', 'mcp-abilities-provider' ),
+		'description' => __( 'Обновляет или добавляет мета-ключ для указанного поста. Для удаления передайте delete=true.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'required'   => [ 'post_id', 'meta_key' ],
+			'properties' => [
+				'post_id'    => [ 'type' => 'integer', 'description' => 'ID поста' ],
+				'meta_key'   => [ 'type' => 'string', 'description' => 'Ключ мета' ],
+				'meta_value' => [ 'description' => 'Значение мета (string, number, array, object). Не обязательно при delete=true.' ],
+				'delete'     => [ 'type' => 'boolean', 'description' => 'Удалить мету вместо обновления' ],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array|WP_Error {
+			$post_id  = absint( $input['post_id'] );
+			$meta_key = sanitize_text_field( $input['meta_key'] );
+
+			$post = get_post( $post_id );
+			if ( ! $post ) {
+				return new WP_Error( 'not_found', 'Пост не найден' );
+			}
+
+			if ( ! empty( $input['delete'] ) ) {
+				delete_post_meta( $post_id, $meta_key );
+				return [ 'success' => true, 'action' => 'deleted', 'post_id' => $post_id, 'meta_key' => $meta_key ];
+			}
+
+			$value = $input['meta_value'] ?? '';
+			update_post_meta( $post_id, $meta_key, $value );
+
+			return [
+				'success'  => true,
+				'action'   => 'updated',
+				'post_id'  => $post_id,
+				'meta_key' => $meta_key,
+				'value'    => $value,
+			];
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'manage_options' );
+		},
+	] );
+
+	// --- Обновить term meta ---
+	wp_register_ability( 'mcpap/update-term-meta', [
+		'label'       => __( 'Обновить мета термина', 'mcp-abilities-provider' ),
+		'description' => __( 'Обновляет или добавляет мета-ключ для термина таксономии.', 'mcp-abilities-provider' ),
+		'category'    => 'classified',
+		'meta'        => [ 'mcp' => [ 'public' => true, 'type' => 'tool' ] ],
+		'input_schema' => [
+			'type'       => 'object',
+			'required'   => [ 'term_id', 'meta_key' ],
+			'properties' => [
+				'term_id'    => [ 'type' => 'integer', 'description' => 'ID термина' ],
+				'meta_key'   => [ 'type' => 'string', 'description' => 'Ключ мета' ],
+				'meta_value' => [ 'description' => 'Значение мета (string, number, array, object).' ],
+				'delete'     => [ 'type' => 'boolean', 'description' => 'Удалить мету вместо обновления' ],
+			],
+		],
+		'execute_callback'    => function ( array $input ): array|WP_Error {
+			$term_id  = absint( $input['term_id'] );
+			$meta_key = sanitize_text_field( $input['meta_key'] );
+
+			if ( ! empty( $input['delete'] ) ) {
+				delete_term_meta( $term_id, $meta_key );
+				return [ 'success' => true, 'action' => 'deleted', 'term_id' => $term_id, 'meta_key' => $meta_key ];
+			}
+
+			$value = $input['meta_value'] ?? '';
+			update_term_meta( $term_id, $meta_key, $value );
+
+			return [
+				'success'  => true,
+				'action'   => 'updated',
+				'term_id'  => $term_id,
+				'meta_key' => $meta_key,
+				'value'    => $value,
+			];
+		},
+		'permission_callback' => function (): bool {
+			return current_user_can( 'manage_options' );
+		},
+	] );
+}
+
+// Регистрация diagnostic abilities.
+add_action( 'wp_abilities_api_init', function (): void {
+	mcpap_register_diagnostic_abilities();
+}, 25 );
