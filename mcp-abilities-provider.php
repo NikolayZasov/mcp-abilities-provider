@@ -4770,3 +4770,427 @@ function mcpap_register_diagnostic_abilities(): void {
 add_action( 'wp_abilities_api_init', function (): void {
 	mcpap_register_diagnostic_abilities();
 }, 25 );
+
+// ═════════════════════════════════════════════════════════════════════════════
+// FORM BUILDER ABILITIES (rtcl_forms table)
+// ═════════════════════════════════════════════════════════════════════════════
+
+function mcpap_register_fb_abilities(): void {
+
+	wp_register_ability( 'mcpap/db-query', array(
+		'label'       => 'SQL SELECT запрос (диагностика)',
+		'description' => 'Выполняет SELECT/SHOW/DESCRIBE запрос к БД. Используйте {prefix} для префикса таблиц.',
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => array( 'mcp' => array( 'public' => true, 'type' => 'tool' ) ),
+		'input_schema' => array(
+			'type'       => 'object',
+			'required'   => array( 'query' ),
+			'properties' => array(
+				'query' => array( 'type' => 'string', 'description' => 'SQL запрос. {prefix} = wp prefix.' ),
+			),
+		),
+		'execute_callback'    => function ( array $input ) {
+			global $wpdb;
+			$query = trim( $input['query'] );
+			$upper = strtoupper( ltrim( $query ) );
+			if ( ! str_starts_with( $upper, 'SELECT' ) && ! str_starts_with( $upper, 'SHOW' ) && ! str_starts_with( $upper, 'DESCRIBE' ) ) {
+				return new WP_Error( 'forbidden', 'Only SELECT/SHOW/DESCRIBE allowed' );
+			}
+			$query   = str_replace( '{prefix}', $wpdb->prefix, $query );
+			$results = $wpdb->get_results( $query, ARRAY_A );
+			if ( $wpdb->last_error ) {
+				return new WP_Error( 'db_error', $wpdb->last_error );
+			}
+			return array( 'rows' => $results, 'row_count' => count( $results ), 'query' => $query );
+		},
+		'permission_callback' => function () { return current_user_can( 'manage_options' ); },
+	) );
+
+	wp_register_ability( 'mcpap/fb-get-form', array(
+		'label'       => 'Получить форму Form Builder',
+		'description' => 'Данные формы из rtcl_forms: поля, секции, настройки.',
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => array( 'mcp' => array( 'public' => true, 'type' => 'tool' ) ),
+		'input_schema' => array(
+			'type'       => 'object',
+			'required'   => array( 'form_id' ),
+			'properties' => array(
+				'form_id' => array( 'type' => 'integer' ),
+			),
+		),
+		'execute_callback' => function ( array $input ) {
+			global $wpdb;
+			$form_id = absint( $input['form_id'] );
+			$table   = $wpdb->prefix . 'rtcl_forms';
+			$form    = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $form_id ), ARRAY_A );
+			if ( ! $form ) {
+				return new WP_Error( 'not_found', 'Form not found' );
+			}
+			return array(
+				'id'       => (int) $form['id'],
+				'title'    => $form['title'],
+				'slug'     => $form['slug'],
+				'status'   => $form['status'],
+				'default'  => (bool) $form['default'],
+				'fields'   => json_decode( $form['fields'], true ),
+				'sections' => json_decode( $form['sections'], true ),
+				'settings' => json_decode( $form['settings'], true ),
+			);
+		},
+		'permission_callback' => function () { return current_user_can( 'manage_options' ); },
+	) );
+
+	wp_register_ability( 'mcpap/fb-add-fields', array(
+		'label'       => 'Добавить поля в Form Builder',
+		'description' => 'Добавляет поля и новую секцию в форму rtcl_forms.',
+		'category'    => 'classified',
+		'meta'        => array( 'mcp' => array( 'public' => true, 'type' => 'tool' ) ),
+		'input_schema' => array(
+			'type'       => 'object',
+			'required'   => array( 'form_id', 'section_title', 'fields' ),
+			'properties' => array(
+				'form_id'       => array( 'type' => 'integer' ),
+				'section_title' => array( 'type' => 'string' ),
+				'fields'        => array( 'type' => 'array', 'items' => array( 'type' => 'object' ) ),
+			),
+		),
+		'execute_callback' => function ( array $input ) {
+			global $wpdb;
+			$form_id       = absint( $input['form_id'] );
+			$section_title = sanitize_text_field( $input['section_title'] );
+			$table         = $wpdb->prefix . 'rtcl_forms';
+			$form          = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $form_id ), ARRAY_A );
+			if ( ! $form ) {
+				return new WP_Error( 'not_found', 'Form not found' );
+			}
+			$fields   = json_decode( $form['fields'], true ) ?: array();
+			$sections = json_decode( $form['sections'], true ) ?: array();
+			$uuids    = array();
+			foreach ( $input['fields'] as $f ) {
+				$uuid    = substr( bin2hex( random_bytes( 5 ) ), 0, 10 );
+				$element = sanitize_text_field( $f['element'] );
+				$label   = sanitize_text_field( $f['label'] );
+				$fd      = array(
+					'id' => '', 'name' => $element . '_' . $uuid, 'uuid' => $uuid,
+					'label' => $label, 'order' => '0', 'logics' => '', 'preset' => false,
+					'element' => $element, 'section' => $section_title,
+					'filterable' => ! empty( $f['filterable'] ),
+					'validation' => array( 'required' => array( 'value' => ! empty( $f['required'] ), 'message' => 'Required' ) ),
+					'placeholder' => sanitize_text_field( $f['placeholder'] ?? $label ),
+					'single_view' => true, 'archive_view' => false, 'help_message' => '',
+					'default_value' => '', 'values_visible' => false,
+					'container_class' => '', 'label_placement' => '',
+				);
+				if ( ! empty( $f['options'] ) && in_array( $element, array( 'select', 'radio', 'checkbox' ), true ) ) {
+					$opts = array();
+					foreach ( $f['options'] as $o ) {
+						$opts[] = array( 'label' => sanitize_text_field( $o['label'] ), 'value' => sanitize_text_field( $o['value'] ), 'icon_class' => '' );
+					}
+					$fd['options'] = $opts;
+				}
+				$fields[ $uuid ] = $fd;
+				$uuids[]         = $uuid;
+			}
+			$sec_uuid   = substr( bin2hex( random_bytes( 5 ) ), 0, 10 );
+			$sections[] = array(
+				'id' => '', 'icon' => '', 'uuid' => $sec_uuid, 'title' => $section_title,
+				'column' => '', 'logics' => '',
+				'columns' => array( array( 'width' => 100, 'fields' => $uuids ) ),
+				'element' => 'section', 'container_class' => '',
+			);
+			$wpdb->update( $table,
+				array( 'fields' => wp_json_encode( $fields, JSON_UNESCAPED_UNICODE ), 'sections' => wp_json_encode( $sections, JSON_UNESCAPED_UNICODE ) ),
+				array( 'id' => $form_id ), array( '%s', '%s' ), array( '%d' )
+			);
+			return array( 'success' => true, 'form_id' => $form_id, 'section_uuid' => $sec_uuid, 'field_uuids' => $uuids, 'total_fields' => count( $fields ), 'total_sections' => count( $sections ) );
+		},
+		'permission_callback' => function () { return current_user_can( 'manage_options' ); },
+	) );
+
+	wp_register_ability( 'mcpap/fb-patch-form', array(
+		'label'       => 'Патч формы Form Builder',
+		'description' => 'Операции: add_field (в существующую секцию), set_section_logics, set_field_logics.',
+		'category'    => 'classified',
+		'meta'        => array( 'mcp' => array( 'public' => true, 'type' => 'tool' ) ),
+		'input_schema' => array(
+			'type'       => 'object',
+			'required'   => array( 'form_id', 'operations' ),
+			'properties' => array(
+				'form_id'    => array( 'type' => 'integer' ),
+				'operations' => array( 'type' => 'array', 'items' => array( 'type' => 'object' ) ),
+			),
+		),
+		'execute_callback' => function ( array $input ) {
+			global $wpdb;
+			$form_id = absint( $input['form_id'] );
+			$table   = $wpdb->prefix . 'rtcl_forms';
+			$form    = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $form_id ), ARRAY_A );
+			if ( ! $form ) {
+				return new WP_Error( 'not_found', 'Form not found' );
+			}
+			$fields   = json_decode( $form['fields'], true ) ?: array();
+			$sections = json_decode( $form['sections'], true ) ?: array();
+			$log      = array();
+			foreach ( $input['operations'] as $item ) {
+				$op   = $item['op'];
+				$data = $item['data'] ?? array();
+				if ( $op === 'add_field' ) {
+					$st      = sanitize_text_field( $data['section_title'] );
+					$el      = sanitize_text_field( $data['element'] );
+					$lb      = sanitize_text_field( $data['label'] );
+					$uuid    = substr( bin2hex( random_bytes( 5 ) ), 0, 10 );
+					$fd      = array(
+						'id' => '', 'name' => $el . '_' . $uuid, 'uuid' => $uuid,
+						'label' => $lb, 'order' => '0', 'logics' => '', 'preset' => false,
+						'element' => $el, 'section' => $st, 'filterable' => ! empty( $data['filterable'] ),
+						'validation' => array( 'required' => array( 'value' => ! empty( $data['required'] ), 'message' => 'Required' ) ),
+						'placeholder' => sanitize_text_field( $data['placeholder'] ?? $lb ),
+						'single_view' => true, 'archive_view' => false, 'help_message' => '',
+						'default_value' => '', 'values_visible' => false,
+						'container_class' => '', 'label_placement' => '',
+					);
+					if ( ! empty( $data['options'] ) ) {
+						$opts = array();
+						foreach ( $data['options'] as $o ) {
+							$opts[] = array( 'label' => sanitize_text_field( $o['label'] ), 'value' => sanitize_text_field( $o['value'] ), 'icon_class' => '' );
+						}
+						$fd['options'] = $opts;
+					}
+					$fields[ $uuid ] = $fd;
+					$added = false;
+					foreach ( $sections as &$s ) {
+						if ( $s['title'] === $st ) {
+							$s['columns'][0]['fields'][] = $uuid;
+							$added = true;
+							break;
+						}
+					}
+					unset( $s );
+					$log[] = array( 'op' => 'add_field', 'uuid' => $uuid, 'label' => $lb, 'added_to_section' => $added );
+				} elseif ( $op === 'set_section_logics' ) {
+					$st    = sanitize_text_field( $data['section_title'] );
+					$found = false;
+					foreach ( $sections as &$s ) {
+						if ( $s['title'] === $st ) {
+							$s['logics'] = $data['logics'];
+							$found = true;
+							break;
+						}
+					}
+					unset( $s );
+					$log[] = array( 'op' => 'set_section_logics', 'section' => $st, 'found' => $found );
+				} elseif ( $op === 'rename_section' ) {
+					$old_title = sanitize_text_field( $data['old_title'] );
+					$new_title = sanitize_text_field( $data['new_title'] );
+					$found     = false;
+					foreach ( $sections as &$s ) {
+						if ( $s['title'] === $old_title ) {
+							$s['title'] = $new_title;
+							$found = true;
+							break;
+						}
+					}
+					unset( $s );
+					// also update section reference in fields
+					foreach ( $fields as &$fld ) {
+						if ( isset( $fld['section'] ) && $fld['section'] === $old_title ) {
+							$fld['section'] = $new_title;
+						}
+					}
+					unset( $fld );
+					$log[] = array( 'op' => 'rename_section', 'old' => $old_title, 'new' => $new_title, 'found' => $found );
+				} elseif ( $op === 'set_field_logics' ) {
+					$fu = $data['field_uuid'];
+					if ( isset( $fields[ $fu ] ) ) {
+						$fields[ $fu ]['logics'] = $data['logics'];
+						$log[] = array( 'op' => 'set_field_logics', 'uuid' => $fu, 'ok' => true );
+					} else {
+						$log[] = array( 'op' => 'set_field_logics', 'uuid' => $fu, 'ok' => false );
+					}
+				}
+			}
+			$wpdb->update( $table,
+				array( 'fields' => wp_json_encode( $fields, JSON_UNESCAPED_UNICODE ), 'sections' => wp_json_encode( $sections, JSON_UNESCAPED_UNICODE ) ),
+				array( 'id' => $form_id ), array( '%s', '%s' ), array( '%d' )
+			);
+			return array( 'success' => true, 'log' => $log, 'total_fields' => count( $fields ), 'total_sections' => count( $sections ) );
+		},
+		'permission_callback' => function () { return current_user_can( 'manage_options' ); },
+	) );
+
+	wp_register_ability( 'mcpap/read-server-file', array(
+		'label'       => 'Чтение файла на сервере',
+		'description' => 'Читает файл/директорию в wp-content/plugins. Диагностика.',
+		'category'    => 'classified',
+		'readonly'    => true,
+		'meta'        => array( 'mcp' => array( 'public' => true, 'type' => 'tool' ) ),
+		'input_schema' => array(
+			'type'       => 'object',
+			'required'   => array( 'path' ),
+			'properties' => array(
+				'path'   => array( 'type' => 'string', 'description' => 'Path relative to WP_PLUGIN_DIR' ),
+				'offset' => array( 'type' => 'integer', 'description' => 'Byte offset (default 0)' ),
+				'length' => array( 'type' => 'integer', 'description' => 'Bytes to read (default 8000, max 16000)' ),
+			),
+		),
+		'execute_callback' => function ( array $input ) {
+			$rel  = ltrim( $input['path'], '/' );
+			if ( strpos( $rel, '..' ) !== false ) {
+				return new WP_Error( 'forbidden', 'No .. allowed' );
+			}
+			$full = WP_PLUGIN_DIR . '/' . $rel;
+			if ( is_dir( $full ) ) {
+				$items  = array_diff( scandir( $full ), array( '.', '..' ) );
+				$result = array();
+				foreach ( $items as $it ) {
+					$p = $full . '/' . $it;
+					$result[] = array( 'name' => $it, 'type' => is_dir( $p ) ? 'dir' : 'file', 'size' => is_file( $p ) ? filesize( $p ) : null );
+				}
+				return array( 'type' => 'directory', 'path' => $rel, 'items' => $result );
+			}
+			if ( ! file_exists( $full ) ) {
+				return new WP_Error( 'not_found', 'Not found: ' . $rel );
+			}
+			$off = max( 0, (int) ( $input['offset'] ?? 0 ) );
+			$len = min( 16000, max( 1, (int) ( $input['length'] ?? 8000 ) ) );
+			$fh  = fopen( $full, 'r' );
+			if ( $off > 0 ) { fseek( $fh, $off ); }
+			$content = fread( $fh, $len );
+			fclose( $fh );
+			$sz = filesize( $full );
+			return array( 'type' => 'file', 'path' => $rel, 'file_size' => $sz, 'offset' => $off, 'length' => strlen( $content ), 'has_more' => ( $off + strlen( $content ) ) < $sz, 'content' => $content );
+		},
+		'permission_callback' => function () { return current_user_can( 'manage_options' ); },
+	) );
+
+	wp_register_ability( 'mcpap/fb-add-preset-fields', array(
+		'label'       => 'Добавить preset-поля в форму',
+		'description' => 'Добавляет секцию с основными полями (category, title, description, images, pricing) в Form Builder форму.',
+		'category'    => 'classified',
+		'meta'        => array( 'mcp' => array( 'public' => true, 'type' => 'tool' ) ),
+		'input_schema' => array(
+			'type'       => 'object',
+			'required'   => array( 'form_id' ),
+			'properties' => array(
+				'form_id'                => array( 'type' => 'integer' ),
+				'section_title'          => array( 'type' => 'string', 'description' => 'Название секции (по умолчанию: Основная информация)' ),
+				'category_top_level_ids' => array( 'type' => 'array', 'items' => array( 'type' => 'integer' ), 'description' => 'ID категорий верхнего уровня для ограничения выбора' ),
+			),
+		),
+		'execute_callback' => function ( array $input ) {
+			global $wpdb;
+			$form_id       = absint( $input['form_id'] );
+			$section_title = sanitize_text_field( $input['section_title'] ?? 'Основная информация' );
+			$top_ids       = ! empty( $input['category_top_level_ids'] ) ? array_map( 'absint', (array) $input['category_top_level_ids'] ) : array();
+			$table         = $wpdb->prefix . 'rtcl_forms';
+			$form          = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$table} WHERE id = %d", $form_id ), ARRAY_A );
+			if ( ! $form ) {
+				return new WP_Error( 'not_found', 'Form not found' );
+			}
+			$fields   = json_decode( $form['fields'], true ) ?: array();
+			$sections = json_decode( $form['sections'], true ) ?: array();
+			foreach ( $fields as $f ) {
+				if ( ! empty( $f['element'] ) && $f['element'] === 'category' && ! empty( $f['preset'] ) ) {
+					return array( 'success' => false, 'error' => 'Category preset already exists', 'category_field_uuid' => $f['uuid'] );
+				}
+			}
+			$cat_uuid   = substr( bin2hex( random_bytes( 5 ) ), 0, 10 );
+			$title_uuid = substr( bin2hex( random_bytes( 5 ) ), 0, 10 );
+			$desc_uuid  = substr( bin2hex( random_bytes( 5 ) ), 0, 10 );
+			$imgs_uuid  = substr( bin2hex( random_bytes( 5 ) ), 0, 10 );
+			$price_uuid = substr( bin2hex( random_bytes( 5 ) ), 0, 10 );
+			$cat_field  = array(
+				'id' => '', 'uuid' => $cat_uuid, 'element' => 'category', 'preset' => 1,
+				'type' => 'single', 'name' => 'category', 'label' => 'Категория',
+				'logics' => '', 'order' => '0', 'placeholder' => '',
+				'container_class' => '', 'label_placement' => '', 'help_message' => '', 'admin_use_only' => false,
+				'validation' => array( 'required' => array( 'value' => true, 'message' => 'Обязательное поле' ) ),
+			);
+			if ( ! empty( $top_ids ) ) {
+				$cat_field['top_level_ids'] = $top_ids;
+			}
+			$fields[ $cat_uuid ]   = $cat_field;
+			$fields[ $title_uuid ] = array(
+				'id' => '', 'uuid' => $title_uuid, 'element' => 'title', 'preset' => 1,
+				'type' => 'text', 'name' => 'title', 'label' => 'Название объявления',
+				'logics' => '', 'order' => '0', 'default_value' => '',
+				'placeholder' => 'Введите название', 'container_class' => '', 'label_placement' => '', 'help_message' => '',
+				'validation' => array(
+					'required' => array( 'value' => true, 'message' => 'Обязательное поле' ),
+					'min'      => array( 'value' => 2, 'message' => 'Минимум {value} символа' ),
+					'max'      => array( 'value' => 255, 'message' => 'Максимум {value} символов' ),
+				),
+			);
+			$fields[ $desc_uuid ]  = array(
+				'id' => '', 'uuid' => $desc_uuid, 'element' => 'description', 'preset' => 1,
+				'name' => 'description', 'label' => 'Текст объявления',
+				'logics' => '', 'order' => '0', 'editor_type' => 'textarea',
+				'placeholder' => '', 'rows' => 5, 'cols' => '',
+				'container_class' => '', 'label_placement' => '', 'help_message' => '', 'admin_use_only' => false,
+				'validation' => array( 'required' => array( 'value' => false, 'message' => '' ) ),
+			);
+			$fields[ $imgs_uuid ]  = array(
+				'id' => '', 'uuid' => $imgs_uuid, 'element' => 'images', 'preset' => 1,
+				'name' => 'images', 'label' => 'Фото',
+				'logics' => '', 'order' => '0', 'placeholder' => '',
+				'container_class' => '', 'label_placement' => '', 'help_message' => '', 'admin_use_only' => false,
+				'validation' => array(
+					'required'            => array( 'value' => false, 'message' => '' ),
+					'max_file_size'       => array( 'value' => 10, '_valueFrom' => 'MB', 'message' => 'Максимальный размер {value}MB' ),
+					'max_file_count'      => array( 'value' => 10, 'message' => 'Максимум {value} изображений' ),
+					'allowed_image_types' => array( 'value' => array( 'jpeg', 'jpg', 'png', 'webp' ), 'message' => 'Недопустимый формат' ),
+				),
+			);
+			$fields[ $price_uuid ] = array(
+				'id' => '', 'uuid' => $price_uuid, 'element' => 'pricing', 'preset' => 1,
+				'name' => 'pricing', 'label' => 'Цена (руб.)',
+				'logics' => '', 'order' => '0', 'options' => array(),
+				'class' => '', 'placeholder' => '', 'container_class' => '',
+				'pricing_type' => 'price', 'price_type' => 'fixed',
+				'label_placement' => '', 'pricing_type_label' => 'Тип', 'price_type_label' => 'Тип цены',
+				'price_unit_label' => 'Единица', 'price_label' => 'Цена (руб.)',
+				'help_message' => '', 'admin_use_only' => false,
+				'validation' => array( 'required' => array( 'value' => false, 'message' => '' ) ),
+			);
+			$sec_uuid    = substr( bin2hex( random_bytes( 5 ) ), 0, 10 );
+			$new_section = array(
+				'id' => '', 'icon' => '', 'uuid' => $sec_uuid, 'title' => $section_title,
+				'column' => '', 'logics' => '',
+				'columns'        => array( array( 'width' => 100, 'fields' => array( $cat_uuid, $title_uuid, $desc_uuid, $imgs_uuid, $price_uuid ) ) ),
+				'element'        => 'section', 'container_class' => '',
+			);
+			array_unshift( $sections, $new_section );
+			$wpdb->update(
+				$table,
+				array(
+					'fields'   => wp_json_encode( $fields, JSON_UNESCAPED_UNICODE ),
+					'sections' => wp_json_encode( $sections, JSON_UNESCAPED_UNICODE ),
+				),
+				array( 'id' => $form_id ),
+				array( '%s', '%s' ),
+				array( '%d' )
+			);
+			return array(
+				'success'               => true,
+				'form_id'               => $form_id,
+				'section_uuid'          => $sec_uuid,
+				'category_field_uuid'   => $cat_uuid,
+				'title_field_uuid'      => $title_uuid,
+				'description_field_uuid' => $desc_uuid,
+				'images_field_uuid'     => $imgs_uuid,
+				'pricing_field_uuid'    => $price_uuid,
+				'total_sections'        => count( $sections ),
+				'total_fields'          => count( $fields ),
+			);
+		},
+		'permission_callback' => function () { return current_user_can( 'manage_options' ); },
+	) );
+}
+
+add_action( 'wp_abilities_api_init', function (): void {
+	if ( defined( 'RTCL_VERSION' ) ) {
+		mcpap_register_fb_abilities();
+	}
+}, 30 );
